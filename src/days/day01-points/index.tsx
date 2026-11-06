@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { boundsOf, inverseMask, polygonsOf } from '../../core/geo';
+import { boundsOf, inverseMask, pointInPolys, polygonsOf } from '../../core/geo';
+import { KINDS, badgeUrl, imageId, loadBadge } from './icons';
 
 // Data is produced by pipeline/01_osm_facilities.py
 const FAC_URL = '/data/day01-facilities.geojson';
@@ -11,14 +12,6 @@ const BND = 'd01-boundary';
 const MASK = 'd01-mask';
 const LAYERS = ['d01-mask', 'd01-area', 'd01-glow', 'd01-casing', 'd01-edge', FAC];
 const SOURCES = [FAC, BND, MASK];
-
-const KINDS: Record<string, { label: string; color: string }> = {
-  hospital: { label: 'Hospital', color: '#e11d48' },
-  clinic: { label: 'Clinic / health centre', color: '#f97316' },
-  school: { label: 'School', color: '#2563eb' },
-  fire_station: { label: 'Fire station', color: '#b91c1c' },
-  police: { label: 'Police', color: '#334155' },
-};
 
 const getJson = (u: string) =>
   fetch(u).then((r) => {
@@ -33,9 +26,10 @@ export default function Day01({ map }: { map: maplibregl.Map }) {
 
   useEffect(() => {
     let cancelled = false;
-    const popup = new maplibregl.Popup({ closeButton: false, offset: 8 });
+    const popup = new maplibregl.Popup({ closeButton: false, offset: 14 });
 
-    Promise.allSettled([getJson(BND_URL), getJson(FAC_URL)]).then(([bnd, fac]) => {
+    (async () => {
+      const [bnd, fac] = await Promise.allSettled([getJson(BND_URL), getJson(FAC_URL)]);
       if (cancelled) return;
 
       // 1. Boundary: dim the outside, tint the inside, glow the edge
@@ -68,37 +62,45 @@ export default function Day01({ map }: { map: maplibregl.Map }) {
         }
       }
 
-      // 2. Facilities
+      // 2. Facilities as icon badges, clipped to the boundary
       if (fac.status === 'fulfilled') {
-        const feats = fac.value.features as { properties: { kind: string } }[];
+        const polys = bnd.status === 'fulfilled' ? polygonsOf(bnd.value) : [];
+        const feats = (fac.value.features as { geometry: { coordinates: number[] }; properties: { kind: string } }[]).filter(
+          (f) => !polys.length || pointInPolys(f.geometry.coordinates[0], f.geometry.coordinates[1], polys),
+        );
         const c: Record<string, number> = {};
         feats.forEach((f) => (c[f.properties.kind] = (c[f.properties.kind] ?? 0) + 1));
         setCounts(c);
 
-        map.addSource(FAC, { type: 'geojson', data: fac.value });
+        // Render each badge once and register it with the map (64 px bitmap shown at 32 px)
+        const imgs = await Promise.all(Object.keys(KINDS).map(async (k) => [k, await loadBadge(k)] as const));
+        if (cancelled) return;
+        imgs.forEach(([k, img]) => {
+          if (!map.hasImage(imageId(k))) map.addImage(imageId(k), img, { pixelRatio: 2 });
+        });
+
+        map.addSource(FAC, { type: 'geojson', data: { type: 'FeatureCollection', features: feats } as any });
         map.addLayer({
           id: FAC,
-          type: 'circle',
+          type: 'symbol',
           source: FAC,
-          paint: {
-            'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 3, 15, 8],
-            'circle-color': [
-              'match',
-              ['get', 'kind'],
-              ...Object.entries(KINDS).flatMap(([k, v]) => [k, v.color]),
-              '#888',
-            ] as unknown as maplibregl.ExpressionSpecification,
-            'circle-stroke-color': '#fff',
-            'circle-stroke-width': 1.2,
+          layout: {
+            'icon-image': ['concat', 'd01-', ['get', 'kind']],
+            'icon-size': ['interpolate', ['linear'], ['zoom'], 9, 0.28, 10, 0.4, 12, 0.7, 14, 1.05, 17, 1.6],
+            'icon-allow-overlap': true,
+            'icon-ignore-placement': true,
+            // rarer, more critical facilities draw on top of the 300 schools
+            'symbol-sort-key': ['match', ['get', 'kind'], 'hospital', 5, 'fire_station', 4, 'police', 4, 'clinic', 3, 1],
           },
-        });
+        } as maplibregl.LayerSpecification);
+
         map.on('mousemove', FAC, (e) => {
           map.getCanvas().style.cursor = 'pointer';
           const f = e.features?.[0];
           if (!f) return;
           const p = f.properties as Record<string, string>;
           popup
-            .setLngLat(e.lngLat)
+            .setLngLat((f.geometry as GeoJSON.Point).coordinates as [number, number])
             .setHTML(`<strong>${p.name || '(unnamed)'}</strong><br/>${KINDS[p.kind]?.label ?? p.kind}`)
             .addTo(map);
         });
@@ -109,13 +111,14 @@ export default function Day01({ map }: { map: maplibregl.Map }) {
       }
 
       if (bnd.status === 'rejected' || fac.status === 'rejected') setMissing(true);
-    });
+    })();
 
     return () => {
       cancelled = true;
       popup.remove();
       LAYERS.forEach((l) => map.getLayer(l) && map.removeLayer(l));
       SOURCES.forEach((s) => map.getSource(s) && map.removeSource(s));
+      Object.keys(KINDS).forEach((k) => map.hasImage(imageId(k)) && map.removeImage(imageId(k)));
     };
   }, [map]);
 
@@ -143,7 +146,7 @@ export default function Day01({ map }: { map: maplibregl.Map }) {
               })
             }
           />
-          <span className="swatch" style={{ background: v.color }} />
+          <img src={badgeUrl(k, 40)} width={20} height={20} alt="" />
           <span style={{ flex: 1 }}>{v.label}</span>
           {counts && <span className="muted">{counts[k] ?? 0}</span>}
         </label>

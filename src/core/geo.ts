@@ -24,6 +24,21 @@ export function boundsOf(polys: PolygonCoords[]): [[number, number], [number, nu
   return Number.isFinite(w) ? [[w, s], [e, n]] : null;
 }
 
+function inRing(x: number, y: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// True if the point lies inside any polygon (outer ring in, holes out).
+export function pointInPolys(x: number, y: number, polys: PolygonCoords[]): boolean {
+  return polys.some((p) => inRing(x, y, p[0]) && !p.slice(1).some((h) => inRing(x, y, h)));
+}
+
 // A world-sized polygon with the given polygons cut out. Fill it to dim everything outside.
 export function inverseMask(polys: PolygonCoords[]) {
   const world: Ring = [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]];
