@@ -36,4 +36,4 @@ Chapters add layers on mount and must remove them on unmount (see `day01-points`
 python pipeline/01_osm_facilities.py
 ```
 
-Uses only the Python standard library (Overpass API).
+Fetches the Butuan City boundary (Nominatim) and the facilities inside it (Overpass). Standard library only, Python 3.10+.

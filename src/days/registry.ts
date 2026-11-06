@@ -20,7 +20,7 @@ export interface DayEntry extends DayMeta {
 
 // Planned chapters. Edit title/insight/sources here as each day gets built.
 const META: DayMeta[] = [
-  { day: 1, slug: 'points', theme: 'Points', prompt: 'A map challenge classic. Map with points.', title: 'Critical facilities', insight: 'Where the city keeps its safety net: hospitals, schools, fire stations and evacuation-capable sites.', sources: ['OpenStreetMap contributors (ODbL)'] },
+  { day: 1, slug: 'points', theme: 'Points', prompt: 'A map challenge classic. Map with points.', title: 'Critical facilities', insight: 'Where the city keeps its safety net: hospitals, schools, fire stations and evacuation-capable sites.', sources: ['OpenStreetMap contributors (ODbL): city boundary via Nominatim, facilities via Overpass'] },
   { day: 2, slug: 'lines', theme: 'Lines', prompt: 'A map challenge classic. Map with lines.', title: 'Agusan river system', insight: 'Waterways drawn by stream order.', sources: ['OpenStreetMap', 'HydroSHEDS'] },
   { day: 3, slug: 'polygons', theme: 'Polygons', prompt: 'A map challenge classic. Map with polygons.', title: '86 barangays', insight: 'Population density by barangay.', sources: ['HDX COD-AB', 'WorldPop'] },
   { day: 4, slug: 'clusters', theme: 'Clusters', prompt: 'Clusters of something. Hotspots, groups, things that gather together.', title: 'Where things gather', insight: 'Density hotspots of buildings and POIs.', sources: ['OpenStreetMap'] },
