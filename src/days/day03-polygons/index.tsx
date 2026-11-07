@@ -93,7 +93,7 @@ export default function Day03({ map }: { map: maplibregl.Map }) {
     };
 
     (async () => {
-      bh = await addBoundary(map, 'd03', { mask: false, signal: ac.signal });
+      bh = await addBoundary(map, 'd03', { signal: ac.signal });
       if (cancelled) return;
       if (!bh || !bh.bounds) {
         setMissing(['city boundary (run pipeline/01_osm_facilities.py)']);

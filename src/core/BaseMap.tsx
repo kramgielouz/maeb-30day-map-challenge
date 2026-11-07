@@ -31,6 +31,8 @@ export default function BaseMap({ children }: Props) {
     el.style.cssText = 'position:absolute;inset:0';
     host.appendChild(el);
 
+    let disposed = false;
+
     const q = new URLSearchParams(window.location.search);
     const lng = parseFloat(q.get('lng') ?? '');
     const lat = parseFloat(q.get('lat') ?? '');
@@ -46,7 +48,13 @@ export default function BaseMap({ children }: Props) {
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     m.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
-    let disposed = false;
+    // The side panel can collapse, so the map has to follow its container, not only the window.
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => !disposed && m.resize());
+    });
+    ro.observe(host);
 
     // Keep the map position in the URL so every view is shareable.
     // Pass the existing history state through: React Router keeps its bookkeeping there.
@@ -67,6 +75,8 @@ export default function BaseMap({ children }: Props) {
 
     return () => {
       disposed = true;
+      ro.disconnect();
+      cancelAnimationFrame(raf);
       m.off('moveend', sync);
       setMap(null);
       // React runs a parent's cleanup before its children's. The day components still need a live map
