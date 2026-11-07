@@ -48,3 +48,64 @@ export function inverseMask(polys: PolygonCoords[]) {
     geometry: { type: 'Polygon' as const, coordinates: [world, ...polys.map((p) => p[0])] },
   };
 }
+
+// ---------- measurements ----------
+const R_EARTH = 6371008.8;
+const RAD = Math.PI / 180;
+
+export function lineLengthM(c: number[][]): number {
+  let s = 0;
+  for (let i = 1; i < c.length; i++) {
+    const [x1, y1] = c[i - 1];
+    const [x2, y2] = c[i];
+    const dLat = (y2 - y1) * RAD;
+    const dLng = (x2 - x1) * RAD;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(y1 * RAD) * Math.cos(y2 * RAD) * Math.sin(dLng / 2) ** 2;
+    s += 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  return s;
+}
+
+function ringAreaM2(ring: Ring): number {
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    a += (x2 - x1) * RAD * (2 + Math.sin(y1 * RAD) + Math.sin(y2 * RAD));
+  }
+  return Math.abs((a * R_EARTH * R_EARTH) / 2);
+}
+
+export function areaM2(gj: any): number {
+  return polygonsOf(gj).reduce((s, p) => s + ringAreaM2(p[0]) - p.slice(1).reduce((h, r) => h + ringAreaM2(r), 0), 0);
+}
+
+export function coordsBounds(c: number[][]): [[number, number], [number, number]] {
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+  for (const [x, y] of c) {
+    if (x < w) w = x;
+    if (x > e) e = x;
+    if (y < s) s = y;
+    if (y > n) n = y;
+  }
+  return [[w, s], [e, n]];
+}
+
+export function mergeBounds(a: [[number, number], [number, number]], b: [[number, number], [number, number]]): [[number, number], [number, number]] {
+  return [[Math.min(a[0][0], b[0][0]), Math.min(a[0][1], b[0][1])], [Math.max(a[1][0], b[1][0]), Math.max(a[1][1], b[1][1])]];
+}
+
+// Split a line into the runs of vertices that fall inside the polygons.
+export function clipLine(coords: number[][], polys: PolygonCoords[]): number[][][] {
+  const out: number[][][] = [];
+  let cur: number[][] = [];
+  for (const c of coords) {
+    if (pointInPolys(c[0], c[1], polys)) cur.push(c);
+    else {
+      if (cur.length > 1) out.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length > 1) out.push(cur);
+  return out;
+}

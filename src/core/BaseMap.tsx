@@ -20,14 +20,21 @@ export default function BaseMap({ children }: Props) {
   const [map, setMap] = useState<maplibregl.Map | null>(null);
 
   useEffect(() => {
-    if (!container.current) return;
+    const host = container.current;
+    if (!host) return;
+
+    // A fresh element per mount, so a map that is still being torn down can never touch the new one.
+    const el = document.createElement('div');
+    el.style.cssText = 'position:absolute;inset:0';
+    host.appendChild(el);
+
     const q = new URLSearchParams(window.location.search);
     const lng = parseFloat(q.get('lng') ?? '');
     const lat = parseFloat(q.get('lat') ?? '');
     const z = parseFloat(q.get('z') ?? '');
 
     const m = new maplibregl.Map({
-      container: container.current,
+      container: el,
       style: BASE_STYLE,
       center: Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : BUTUAN_CENTER,
       zoom: Number.isFinite(z) ? z : 11,
@@ -36,21 +43,35 @@ export default function BaseMap({ children }: Props) {
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     m.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
-    // Keep map position in the URL so every view is shareable
+    let disposed = false;
+
+    // Keep the map position in the URL so every view is shareable.
+    // Pass the existing history state through: React Router keeps its bookkeeping there.
     const sync = () => {
+      if (disposed) return; // never write a closed map's position onto another page's URL
       const c = m.getCenter();
       const p = new URLSearchParams(window.location.search);
       p.set('lng', c.lng.toFixed(4));
       p.set('lat', c.lat.toFixed(4));
       p.set('z', m.getZoom().toFixed(2));
-      window.history.replaceState(null, '', `${window.location.pathname}?${p.toString()}`);
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}?${p.toString()}`);
     };
     m.on('moveend', sync);
 
-    m.on('load', () => setMap(m));
+    m.on('load', () => {
+      if (!disposed) setMap(m);
+    });
+
     return () => {
-      m.remove();
+      disposed = true;
+      m.off('moveend', sync);
       setMap(null);
+      // React runs a parent's cleanup before its children's. The day components still need a live map
+      // to remove their layers, so destroy the map on the next tick, after they are done.
+      setTimeout(() => {
+        m.remove();
+        el.remove();
+      }, 0);
     };
   }, []);
 

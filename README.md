@@ -30,10 +30,21 @@ Chapters add layers on mount and must remove them on unmount (see `day01-points`
 - Record source, licence and fetch date for every dataset.
 - Keep OSM attribution (ODbL) visible.
 
-## Day 1 data
+## Data scripts (run once, locally, in order)
 
 ```bash
-python pipeline/01_osm_facilities.py
+python pipeline/01_osm_facilities.py   # Day 1: boundary + facilities (run this first)
+python pipeline/02_osm_waterways.py    # Day 2
+python pipeline/03_osm_barangays.py    # Day 3
+python pipeline/04_osm_pois.py         # Day 4
 ```
 
-Fetches the Butuan City boundary (Nominatim) and the facilities inside it (Overpass). Standard library only, Python 3.10+.
+Day 5 needs no script: it reads open terrain tiles live in the browser.
+
+All scripts use only the Python standard library (3.10+) and try several Overpass servers.
+
+### Day 3 population (optional)
+
+Add `public/data/barangay-population.csv` with columns `name,population` to switch on the density view.
+If OSM is missing some of the 86 barangays, save your own file as `public/data/barangays.geojson` (needs a `name` property).
+Only publish layers that are cleared for release.
