@@ -11,6 +11,9 @@ export const BUTUAN_CENTER: [number, number] = [125.5406, 8.9475];
 // OpenFreeMap needs no API key. Swap for a Protomaps PMTiles style later if you want full self-hosting.
 export const BASE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 
+// Where the city boundary used on every map comes from (pipeline/01_osm_facilities.py).
+const BOUNDARY_ATTRIBUTION = 'City boundary: OpenStreetMap contributors (ODbL), via Nominatim';
+
 interface Props {
   children?: (map: maplibregl.Map) => React.ReactNode;
 }
@@ -38,7 +41,7 @@ export default function BaseMap({ children }: Props) {
       style: BASE_STYLE,
       center: Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : BUTUAN_CENTER,
       zoom: Number.isFinite(z) ? z : 11,
-      attributionControl: { compact: true },
+      attributionControl: { compact: true, customAttribution: BOUNDARY_ATTRIBUTION },
     });
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     m.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
@@ -79,6 +82,12 @@ export default function BaseMap({ children }: Props) {
     <div className="map-wrap">
       <div ref={container} className="map" />
       {map && children?.(map)}
+      <div className="boundary-note">
+        <div>Basemap: OpenFreeMap, OpenMapTiles, © OpenStreetMap contributors.</div>
+        <div>
+          City boundary: OpenStreetMap (relation via Nominatim, ODbL), taken from online data. For illustration only, not an official or legal boundary.
+        </div>
+      </div>
     </div>
   );
 }
