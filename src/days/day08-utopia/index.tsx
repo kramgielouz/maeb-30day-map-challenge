@@ -23,6 +23,7 @@ import {
   type RawLine,
   type Speeds,
 } from './graph';
+import { layout, LED_COLOURS, type Prism } from './imagine';
 
 // Utopia: every river, canal and creek in Butuan developed into a transport channel, with boats running between landings.
 // Data: Day 2 waterways, Day 1 facilities, Day 4 points of interest. Nothing new to download.
@@ -30,7 +31,7 @@ const WW_URL = '/data/day02-waterways.geojson';
 const FAC_URL = '/data/day01-facilities.geojson';
 const POI_URL = '/data/day04-pois.geojson';
 
-const S = { net: 'd08-net', stops: 'd08-stops', route: 'd08-route', wake: 'd08-wake', pts: 'd08-boat-pts', hull: 'd08-boat-hull', fac: 'd08-fac', poi: 'd08-poi', near: 'd08-near', towers: 'd08-towers' };
+const S = { net: 'd08-net', stops: 'd08-stops', route: 'd08-route', wake: 'd08-wake', pts: 'd08-boat-pts', hull: 'd08-boat-hull', fac: 'd08-fac', poi: 'd08-poi', near: 'd08-near', towers: 'd08-towers', city: 'd08-city' };
 const L = {
   dim: 'd08-dim',
   bld: 'd08-bld',
@@ -51,6 +52,8 @@ const L = {
   dot: 'd08-boat-dot',
   track: 'd08-boat-track',
   towers: 'd08-towers-3d',
+  led: 'd08-led',
+  harbour: 'd08-harbour',
   hull: 'd08-boat-3d',
 };
 const BND = 'd08-bnd-area'; // first layer added by addBoundary, so our basemap layers go underneath it
@@ -89,7 +92,6 @@ const BOAT_W = 10;
 const FUTURE_BASE = 14; // metres added to every building at 100% future skyline
 const FUTURE_MULT = 2.5; // plus this multiple of its present height
 const BLD_MINZOOM = 13; // the basemap only carries buildings from about here
-const TOWER_OFFSET = 70; // metres from a landing to each of its two towers
 const EMPTY = { type: 'FeatureCollection', features: [] } as GeoJSON.FeatureCollection;
 const fc = (features: unknown[]) => ({ type: 'FeatureCollection', features }) as GeoJSON.FeatureCollection;
 const fmt = (n: number, d = 0) => n.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -149,22 +151,6 @@ interface Trip {
 }
 type Cam = 'overview' | 'downtown' | 'follow' | 'free';
 
-// a closed polygon around (cx, cy), in lon/lat
-const ngon = (f: Frame, cx: number, cy: number, r: number, n = 8): Pt[] => {
-  const ring = Array.from({ length: n }, (_, i) => unproject(f, cx + r * Math.cos((i / n) * 2 * Math.PI + Math.PI / n), cy + r * Math.sin((i / n) * 2 * Math.PI + Math.PI / n)));
-  return [...ring, ring[0]];
-};
-// a thin rectangle from (ax, ay) to (bx, by), w metres wide
-const bar = (f: Frame, ax: number, ay: number, bx: number, by: number, w: number): Pt[] => {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const l = Math.hypot(dx, dy) || 1;
-  const nx = (-dy / l) * (w / 2);
-  const ny = (dx / l) * (w / 2);
-  const ring = [unproject(f, ax + nx, ay + ny), unproject(f, bx + nx, by + ny), unproject(f, bx - nx, by - ny), unproject(f, ax - nx, ay - ny)];
-  return [...ring, ring[0]];
-};
-
 export default function Day08({ map }: { map: maplibregl.Map }) {
   const [lines, setLines] = useState<RawLine[] | null>(null);
   const [facs, setFacs] = useState<Fac[]>([]);
@@ -178,6 +164,9 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
   const [night, setNight] = useState(true);
   const [cam, setCam] = useState<Cam>('downtown');
   const [future, setFuture] = useState(70);
+  const [showHarbour, setShowHarbour] = useState(true);
+  const [showLandmarks, setShowLandmarks] = useState(true);
+  const [showBoards, setShowBoards] = useState(true);
   const [extra, setExtra] = useState<Pt[]>([]);
   const [sel, setSel] = useState<number[]>([]);
   const [showFac, setShowFac] = useState(true);
@@ -197,6 +186,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
   const frameRef = useRef<Frame | null>(null);
   const gridRef = useRef<Map<string, Place[]>>(new Map());
   const appliedCam = useRef('');
+  const etaRef = useRef<Map<number, number>>(new Map());
   boatsRef.current = boatsN;
   warpRef.current = warp;
   camRef.current = cam;
@@ -442,7 +432,10 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
           'circle-stroke-width': 3,
         },
       });
-      add({ id: L.towers, type: 'fill-extrusion', source: S.towers, paint: { 'fill-extrusion-color': ['get', 'c'], 'fill-extrusion-height': ['*', ['get', 'h'], 0.7], 'fill-extrusion-base': ['*', ['get', 'b'], 0.7], 'fill-extrusion-opacity': 0.95 } });
+      // imagined architecture: harbours (fixed height), and towers and LED screens that follow the skyline slider
+      add({ id: L.harbour, type: 'fill-extrusion', source: S.city, paint: { 'fill-extrusion-color': ['get', 'c'], 'fill-extrusion-height': ['get', 'h'], 'fill-extrusion-base': ['get', 'b'], 'fill-extrusion-opacity': 0.96 } });
+      add({ id: L.towers, type: 'fill-extrusion', source: S.towers, filter: ['!=', ['get', 'led'], 1], paint: { 'fill-extrusion-color': ['get', 'c'], 'fill-extrusion-height': ['*', ['get', 'h'], 0.7], 'fill-extrusion-base': ['*', ['get', 'b'], 0.7], 'fill-extrusion-opacity': 0.95 } });
+      add({ id: L.led, type: 'fill-extrusion', source: S.towers, filter: ['==', ['get', 'led'], 1], paint: { 'fill-extrusion-color': ['get', 'c'], 'fill-extrusion-height': ['*', ['get', 'h'], 0.7], 'fill-extrusion-base': ['*', ['get', 'b'], 0.7], 'fill-extrusion-opacity': 1 } });
       add({ id: L.pulse, type: 'circle', source: S.pts, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 7, 16, 16], 'circle-color': '#fbbf24', 'circle-opacity': 0.22, 'circle-blur': 1 } });
       add({
         id: L.dot,
@@ -616,51 +609,92 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
     const h = ['coalesce', ['get', 'render_height'], 6];
     const fh = ['+', h, ['*', f, ['+', FUTURE_BASE, ['*', FUTURE_MULT, h]]]];
     const ramp = night
-      ? [0, '#1b3550', 25, '#1f6f8b', 60, '#19c3e6', 110, '#a855f7', 180, '#f0abfc']
-      : [0, '#d8d2c4', 25, '#cbd5e1', 60, '#94d6f0', 110, '#c4b5fd', 180, '#f5d0fe'];
+      ? [0, '#e9eaec', 25, '#bdbdbd', 60, '#d6dadf', 110, '#c9cfd8', 180, '#ffffff']
+      : [0, '#e5e7eb', 25, '#d1d5db', 60, '#b6bcc6', 110, '#c2c3c5', 180, '#e8e9eb'];
     if (map.getLayer(L.bld)) {
       map.setPaintProperty(L.bld, 'fill-extrusion-height', fh);
       map.setPaintProperty(L.bld, 'fill-extrusion-color', ['interpolate', ['linear'], fh, ...ramp]);
     }
-    if (map.getLayer(L.towers)) {
-      map.setPaintProperty(L.towers, 'fill-extrusion-height', ['*', ['get', 'h'], f]);
-      map.setPaintProperty(L.towers, 'fill-extrusion-base', ['*', ['get', 'b'], f]);
-      map.setLayoutProperty(L.towers, 'visibility', f > 0 ? 'visible' : 'none');
+    for (const l of [L.towers, L.led]) {
+      if (!map.getLayer(l)) continue;
+      map.setPaintProperty(l, 'fill-extrusion-height', ['*', ['get', 'h'], f]);
+      map.setPaintProperty(l, 'fill-extrusion-base', ['*', ['get', 'b'], f]);
+      map.setLayoutProperty(l, 'visibility', f > 0 ? 'visible' : 'none');
     }
   }, [ready, future, night, map]);
 
-  // a pair of towers framing the channel at every landing, joined by a sky-bridge. The busier the landing, the taller.
+  // ---------- the imagined city: landing towers, harbours, landmarks, LED screens ----------
+  const landingFac = useMemo(() => (net ? landings.map((n) => facs.reduce((c, f) => c + (Math.hypot(f.x - net.x[n], f.y - net.y[n]) <= WALK_M ? 1 : 0), 0)) : []), [net, landings, facs]);
+  const city = useMemo(() => (net && frame ? layout(net, frame, landings, landingFac, Object.fromEntries(CLS.map((c) => [c, CI[c].width]))) : null), [net, frame, landings, landingFac]);
+
   useEffect(() => {
-    if (!ready || !net || !frame) return;
-    const feats: unknown[] = [];
-    const push = (ring: Pt[], c: string, h: number, b: number) => feats.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: { c, h, b } });
-    landings.forEach((n) => {
-      const e = net.adj[n][0];
-      if (e === undefined) return;
-      const ed = net.edges[e];
-      const o = ed.a === n ? ed.b : ed.a;
-      let dx = net.x[o] - net.x[n];
-      let dy = net.y[o] - net.y[n];
-      const len = Math.hypot(dx, dy) || 1;
-      dx /= len;
-      dy /= len;
-      const nx = -dy; // normal to the channel
-      const ny = dx;
-      const fac = facs.reduce((c, f) => c + (Math.hypot(f.x - net.x[n], f.y - net.y[n]) <= WALK_M ? 1 : 0), 0);
-      const H = 70 + Math.min(fac, 12) * 8;
-      for (const side of [1, -1]) {
-        const cx = net.x[n] + nx * TOWER_OFFSET * side;
-        const cy = net.y[n] + ny * TOWER_OFFSET * side;
-        const hh = side === 1 ? H : H * 0.78;
-        push(ngon(frame, cx, cy, 26), '#0e7490', 16, 0); // podium
-        push(ngon(frame, cx, cy, 15), '#22d3ee', hh, 16); // tower
-        push(ngon(frame, cx, cy, 9), '#e879f9', hh + 14, hh); // crown
-        push(ngon(frame, cx, cy, 2.5, 6), '#ffffff', hh + 48, hh + 14); // spire
-      }
-      push(bar(frame, net.x[n] - nx * (TOWER_OFFSET - 14), net.y[n] - ny * (TOWER_OFFSET - 14), net.x[n] + nx * (TOWER_OFFSET - 14), net.y[n] + ny * (TOWER_OFFSET - 14), 6), '#e0f2fe', 38, 34);
+    if (!ready || !city) return;
+    const toFc = (ps: Prism[]) =>
+      fc(ps.map((p) => ({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [p.ring] }, properties: { c: p.c, h: p.h, b: p.b, g: p.g, led: p.led ?? 0, ph: p.ph ?? 0 } })));
+    (map.getSource(S.towers) as maplibregl.GeoJSONSource | undefined)?.setData(toFc(city.prisms));
+    (map.getSource(S.city) as maplibregl.GeoJSONSource | undefined)?.setData(toFc(city.harbours));
+  }, [ready, city, map]);
+
+  // the three toggles
+  useEffect(() => {
+    if (!ready) return;
+    const owners = ['hub', ...(showLandmarks ? ['landmark'] : [])];
+    if (map.getLayer(L.towers)) map.setFilter(L.towers, ['all', ['!=', ['get', 'led'], 1], ['in', ['get', 'g'], ['literal', owners]]] as never);
+    if (map.getLayer(L.led)) map.setFilter(L.led, (showBoards ? ['all', ['==', ['get', 'led'], 1], ['in', ['get', 'g'], ['literal', owners]]] : ['==', ['get', 'led'], 2]) as never);
+    if (map.getLayer(L.harbour)) map.setLayoutProperty(L.harbour, 'visibility', showHarbour ? 'visible' : 'none');
+  }, [ready, showHarbour, showLandmarks, showBoards, map]);
+
+  // LED screens change colour slowly (and stay still if the visitor asked for less motion)
+  useEffect(() => {
+    if (!ready) return;
+    let t = 0;
+    const paint = () => {
+      const expr: unknown[] = ['match', ['get', 'ph']];
+      for (let i = 0; i < 6; i++) expr.push(i, LED_COLOURS[(i + t) % 6]);
+      expr.push(LED_COLOURS[0]);
+      if (map.getLayer(L.led)) map.setPaintProperty(L.led, 'fill-extrusion-color', expr);
+    };
+    paint();
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const id = window.setInterval(() => {
+      t = (t + 1) % 6;
+      paint();
+    }, 1800);
+    return () => window.clearInterval(id);
+  }, [ready, map]);
+
+  // info boards floating over the six busiest landings: name, next boat, slogan
+  useEffect(() => {
+    if (!ready || !net || !frame || !showBoards) return;
+    const top = landings
+      .map((_, i) => i)
+      .sort((a, b) => (landingFac[b] ?? 0) - (landingFac[a] ?? 0))
+      .slice(0, 6);
+    const items = top.map((i) => {
+      const el = document.createElement('div');
+      el.style.cssText =
+        'pointer-events:none;background:#050a14;border:2px solid #fb7185;border-radius:4px;padding:3px 8px;color:#fde68a;font:700 11px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.04em;text-align:center;white-space:nowrap;box-shadow:0 0 12px rgba(251,113,133,.7)';
+      const mk = new maplibregl.Marker({ element: el, anchor: 'bottom', offset: [0, -70] }).setLngLat(unproject(frame, net.x[landings[i]], net.y[landings[i]])).addTo(map);
+      return { i, el, mk };
     });
-    (map.getSource(S.towers) as maplibregl.GeoJSONSource | undefined)?.setData(fc(feats));
-  }, [ready, net, frame, landings, facs, map]);
+    let k = 0;
+    const paint = () => {
+      for (const { i, el } of items) {
+        const eta = etaRef.current.get(i); // seconds of simulated time until the next boat arrives
+        const lines = [landingNames[i] ? landingNames[i].slice(0, 26) : 'Butuan Water Transit', eta === undefined ? 'No boat scheduled' : eta < 30 ? 'Boarding now' : `Next boat ${Math.ceil(eta / 60)} min`, 'RIVER CITY 2060'];
+        el.innerHTML = `<div style="color:#fb7185">LANDING ${i + 1}</div><div>${esc(lines[(k + i) % 3])}</div>`;
+      }
+    };
+    paint();
+    const id = window.setInterval(() => {
+      k++;
+      paint();
+    }, 2500);
+    return () => {
+      window.clearInterval(id);
+      items.forEach((it) => it.mk.remove());
+    };
+  }, [ready, net, frame, landings, landingFac, landingNames, showBoards, map]);
 
   // ---------- camera ----------
   // downtown: the landing with the most facilities around it, where the skyline is densest
@@ -825,6 +859,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
       const tIdx = fleet.length ? Math.min(trackedRef.current, fleet.length - 1) : -1;
 
       const counter = { n: 0 }; // routes computed this frame, kept small so the page never stutters
+      const eta = new Map<number, number>(); // landing -> simulated seconds until a boat arrives
       const pts: unknown[] = [];
       const hull: unknown[] = [];
       const wake: unknown[] = [];
@@ -839,6 +874,9 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
           begin(bt, counter, false);
           if (!bt.path) return;
         }
+        const left = tau <= T ? T - tau : 0; // 0 while a boat is docked
+        const prev = eta.get(bt.to);
+        if (tau <= T + bt.hold && (prev === undefined || left < prev)) eta.set(bt.to, left);
         const pos = positionAt(bt.path, sim - bt.start);
         const c = unproject(frame, pos.x, pos.y);
         pts.push({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: { i: bi, tr: bi === tIdx ? 1 : 0 } });
@@ -869,6 +907,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
         }
       });
 
+      etaRef.current = eta;
       (map.getSource(S.pts) as maplibregl.GeoJSONSource | undefined)?.setData(fc(pts));
       (map.getSource(S.hull) as maplibregl.GeoJSONSource | undefined)?.setData(fc(hull));
       (map.getSource(S.wake) as maplibregl.GeoJSONSource | undefined)?.setData(fc(wake));
@@ -1021,6 +1060,20 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
         Zoom in to see it. Buildings only draw from about zoom 13.
       </p>
 
+      <p className="sub">Imagined city</p>
+      <label className="legend-row">
+        <input type="checkbox" checked={showHarbour} onChange={() => setShowHarbour((v) => !v)} />
+        <span style={{ flex: 1 }}>Harbour districts (cranes, containers)</span>
+      </label>
+      <label className="legend-row">
+        <input type="checkbox" checked={showLandmarks} onChange={() => setShowLandmarks((v) => !v)} />
+        <span style={{ flex: 1 }}>Landmark towers</span>
+      </label>
+      <label className="legend-row">
+        <input type="checkbox" checked={showBoards} onChange={() => setShowBoards((v) => !v)} />
+        <span style={{ flex: 1 }}>Billboards (LED screens, info boards)</span>
+      </label>
+
       <p className="sub">Camera</p>
       <div className="seg">
         <button className={cam === 'overview' ? 'on' : ''} onClick={() => setCam('overview')}>
@@ -1145,7 +1198,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
       )}
 
       <p className="muted" style={{ marginTop: 8 }}>
-        A scenario, not a plan. The building footprints are real OpenStreetMap buildings, but the heights, the landing towers and the sky-bridges are invented. Channel widths and boat speeds are assumed. Many of these waterways are narrow, culverted or drains today, and bridge clearances are not in the data. Faint channels are not connected to the main network. Only places mapped in OpenStreetMap with a name can pop up.
+        A scenario, not a plan. The building footprints are real OpenStreetMap buildings, but the heights, landing towers, sky-bridges, harbours, landmark towers and billboards are invented. Channel widths and boat speeds are assumed. Many of these waterways are narrow, culverted or drains today, and bridge clearances are not in the data. Faint channels are not connected to the main network. Only places mapped in OpenStreetMap with a name can pop up.
       </p>
       {missing && (
         <p className="warn">
