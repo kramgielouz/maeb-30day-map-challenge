@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import BaseMap from '../core/BaseMap';
 import { DAYS, getDay } from '../days/registry';
@@ -24,14 +24,35 @@ export default function DayPage() {
       /* private mode: just do not remember */
     }
   }, [open]);
+
+  // Hiding is two steps: the panel slides out (cheap, map untouched), then the layout changes once.
+  // Animating the layout itself would resize the map on every frame, which is what makes it flicker.
+  const [closing, setClosing] = useState(false);
+  const timer = useRef<number>();
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const hide = useCallback(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setOpen(false);
+      return;
+    }
+    setClosing(true);
+    timer.current = window.setTimeout(() => {
+      setOpen(false);
+      setClosing(false);
+    }, 200);
+  }, []);
+  const show = useCallback(() => setOpen(true), []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
-      if (e.key === '[' && !e.metaKey && !e.ctrlKey && !e.altKey && !(t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) setOpen((o) => !o);
+      if (e.key !== '[' || e.metaKey || e.ctrlKey || e.altKey || (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      if (open && !closing) hide();
+      else if (!open) show();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [open, closing, hide, show]);
 
   if (!day) {
     return (
@@ -47,13 +68,13 @@ export default function DayPage() {
   const Day = day.Component;
 
   return (
-    <div className={open ? 'day-layout' : 'day-layout collapsed'}>
+    <div className={`day-layout${open ? '' : ' collapsed'}${closing ? ' closing' : ''}`}>
       <aside className="panel" aria-hidden={!open}>
         <div className="panel-head">
           <Link to="/" className="back">
             ← All days
           </Link>
-          <button className="panel-toggle" onClick={() => setOpen(false)} title="Hide panel ( [ )" aria-label="Hide panel" tabIndex={open ? 0 : -1}>
+          <button className="panel-toggle" onClick={hide} title="Hide panel ( [ )" aria-label="Hide panel" tabIndex={open ? 0 : -1}>
             ‹ Hide
           </button>
         </div>
@@ -107,7 +128,7 @@ export default function DayPage() {
 
       <main className="map-area">
         {!open && (
-          <button className="panel-open" onClick={() => setOpen(true)} title="Show panel ( [ )" aria-label="Show panel">
+          <button className="panel-open" onClick={show} title="Show panel ( [ )" aria-label="Show panel">
             › Day {day.day}
           </button>
         )}

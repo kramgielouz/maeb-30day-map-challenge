@@ -49,10 +49,11 @@ export default function BaseMap({ children }: Props) {
     m.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
     // The side panel can collapse, so the map has to follow its container, not only the window.
-    let raf = 0;
+    // resize() clears the canvas, so redraw() straight after, in the same frame, to avoid a blank flash.
     const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => !disposed && m.resize());
+      if (disposed) return;
+      m.resize();
+      m.redraw();
     });
     ro.observe(host);
 
@@ -76,7 +77,6 @@ export default function BaseMap({ children }: Props) {
     return () => {
       disposed = true;
       ro.disconnect();
-      cancelAnimationFrame(raf);
       m.off('moveend', sync);
       setMap(null);
       // React runs a parent's cleanup before its children's. The day components still need a live map
