@@ -30,7 +30,7 @@ const WW_URL = '/data/day02-waterways.geojson';
 const FAC_URL = '/data/day01-facilities.geojson';
 const POI_URL = '/data/day04-pois.geojson';
 
-const S = { net: 'd08-net', stops: 'd08-stops', route: 'd08-route', wake: 'd08-wake', pts: 'd08-boat-pts', hull: 'd08-boat-hull', fac: 'd08-fac', poi: 'd08-poi', near: 'd08-near' };
+const S = { net: 'd08-net', stops: 'd08-stops', route: 'd08-route', wake: 'd08-wake', pts: 'd08-boat-pts', hull: 'd08-boat-hull', fac: 'd08-fac', poi: 'd08-poi', near: 'd08-near', towers: 'd08-towers' };
 const L = {
   dim: 'd08-dim',
   bld: 'd08-bld',
@@ -50,6 +50,7 @@ const L = {
   pulse: 'd08-boat-glow',
   dot: 'd08-boat-dot',
   track: 'd08-boat-track',
+  towers: 'd08-towers-3d',
   hull: 'd08-boat-3d',
 };
 const BND = 'd08-bnd-area'; // first layer added by addBoundary, so our basemap layers go underneath it
@@ -85,6 +86,10 @@ const R_IN = 140; // a place pops up when the tracked boat is this close
 const R_OUT = 190; // and goes away again beyond this
 const BOAT_LEN = 34;
 const BOAT_W = 10;
+const FUTURE_BASE = 14; // metres added to every building at 100% future skyline
+const FUTURE_MULT = 2.5; // plus this multiple of its present height
+const BLD_MINZOOM = 13; // the basemap only carries buildings from about here
+const TOWER_OFFSET = 70; // metres from a landing to each of its two towers
 const EMPTY = { type: 'FeatureCollection', features: [] } as GeoJSON.FeatureCollection;
 const fc = (features: unknown[]) => ({ type: 'FeatureCollection', features }) as GeoJSON.FeatureCollection;
 const fmt = (n: number, d = 0) => n.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -142,7 +147,23 @@ interface Trip {
   to: number;
   pct: number;
 }
-type Cam = 'overview' | 'follow' | 'free';
+type Cam = 'overview' | 'downtown' | 'follow' | 'free';
+
+// a closed polygon around (cx, cy), in lon/lat
+const ngon = (f: Frame, cx: number, cy: number, r: number, n = 8): Pt[] => {
+  const ring = Array.from({ length: n }, (_, i) => unproject(f, cx + r * Math.cos((i / n) * 2 * Math.PI + Math.PI / n), cy + r * Math.sin((i / n) * 2 * Math.PI + Math.PI / n)));
+  return [...ring, ring[0]];
+};
+// a thin rectangle from (ax, ay) to (bx, by), w metres wide
+const bar = (f: Frame, ax: number, ay: number, bx: number, by: number, w: number): Pt[] => {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / l) * (w / 2);
+  const ny = (dx / l) * (w / 2);
+  const ring = [unproject(f, ax + nx, ay + ny), unproject(f, bx + nx, by + ny), unproject(f, bx - nx, by - ny), unproject(f, ax - nx, ay - ny)];
+  return [...ring, ring[0]];
+};
 
 export default function Day08({ map }: { map: maplibregl.Map }) {
   const [lines, setLines] = useState<RawLine[] | null>(null);
@@ -155,7 +176,8 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
   const [boatsN, setBoatsN] = useState(24);
   const [warp, setWarp] = useState(20);
   const [night, setNight] = useState(true);
-  const [cam, setCam] = useState<Cam>('overview');
+  const [cam, setCam] = useState<Cam>('downtown');
+  const [future, setFuture] = useState(70);
   const [extra, setExtra] = useState<Pt[]>([]);
   const [sel, setSel] = useState<number[]>([]);
   const [showFac, setShowFac] = useState(true);
@@ -174,6 +196,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
   const netRef = useRef<ReturnType<typeof buildNetwork> | null>(null);
   const frameRef = useRef<Frame | null>(null);
   const gridRef = useRef<Map<string, Place[]>>(new Map());
+  const appliedCam = useRef('');
   boatsRef.current = boatsN;
   warpRef.current = warp;
   camRef.current = cam;
@@ -347,7 +370,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
               type: 'fill-extrusion',
               source: entry[0],
               'source-layer': 'building',
-              minzoom: 14,
+              minzoom: BLD_MINZOOM,
               paint: {
                 'fill-extrusion-color': '#d8d2c4',
                 'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
@@ -419,6 +442,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
           'circle-stroke-width': 3,
         },
       });
+      add({ id: L.towers, type: 'fill-extrusion', source: S.towers, paint: { 'fill-extrusion-color': ['get', 'c'], 'fill-extrusion-height': ['*', ['get', 'h'], 0.7], 'fill-extrusion-base': ['*', ['get', 'b'], 0.7], 'fill-extrusion-opacity': 0.95 } });
       add({ id: L.pulse, type: 'circle', source: S.pts, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 7, 16, 16], 'circle-color': '#fbbf24', 'circle-opacity': 0.22, 'circle-blur': 1 } });
       add({
         id: L.dot,
@@ -575,7 +599,6 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
     if (!ready) return;
     const set = (l: string, p: string, v: unknown) => map.getLayer(l) && map.setPaintProperty(l, p, v);
     set(L.dim, 'background-opacity', night ? 0.62 : 0);
-    set(L.bld, 'fill-extrusion-color', night ? '#26364b' : '#d8d2c4');
     set(L.casing, 'line-color', night ? '#0b2538' : '#f1ede2');
     set(L.glow, 'line-opacity', night ? 0.38 : 0);
     set(L.pulse, 'circle-opacity', night ? 0.35 : 0.2);
@@ -585,11 +608,91 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
     }
   }, [ready, night, map]);
 
-  // ---------- camera ----------
+  // ---------- the future skyline ----------
+  // Heights and colours of the basemap's real building footprints. The heights are invented.
   useEffect(() => {
     if (!ready) return;
-    if (cam === 'overview' && boundsRef.current) map.fitBounds(boundsRef.current, { pitch: 55, bearing: -20, padding: 50, duration: 1600 });
-  }, [cam, ready, map]);
+    const f = future / 100;
+    const h = ['coalesce', ['get', 'render_height'], 6];
+    const fh = ['+', h, ['*', f, ['+', FUTURE_BASE, ['*', FUTURE_MULT, h]]]];
+    const ramp = night
+      ? [0, '#1b3550', 25, '#1f6f8b', 60, '#19c3e6', 110, '#a855f7', 180, '#f0abfc']
+      : [0, '#d8d2c4', 25, '#cbd5e1', 60, '#94d6f0', 110, '#c4b5fd', 180, '#f5d0fe'];
+    if (map.getLayer(L.bld)) {
+      map.setPaintProperty(L.bld, 'fill-extrusion-height', fh);
+      map.setPaintProperty(L.bld, 'fill-extrusion-color', ['interpolate', ['linear'], fh, ...ramp]);
+    }
+    if (map.getLayer(L.towers)) {
+      map.setPaintProperty(L.towers, 'fill-extrusion-height', ['*', ['get', 'h'], f]);
+      map.setPaintProperty(L.towers, 'fill-extrusion-base', ['*', ['get', 'b'], f]);
+      map.setLayoutProperty(L.towers, 'visibility', f > 0 ? 'visible' : 'none');
+    }
+  }, [ready, future, night, map]);
+
+  // a pair of towers framing the channel at every landing, joined by a sky-bridge. The busier the landing, the taller.
+  useEffect(() => {
+    if (!ready || !net || !frame) return;
+    const feats: unknown[] = [];
+    const push = (ring: Pt[], c: string, h: number, b: number) => feats.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] }, properties: { c, h, b } });
+    landings.forEach((n) => {
+      const e = net.adj[n][0];
+      if (e === undefined) return;
+      const ed = net.edges[e];
+      const o = ed.a === n ? ed.b : ed.a;
+      let dx = net.x[o] - net.x[n];
+      let dy = net.y[o] - net.y[n];
+      const len = Math.hypot(dx, dy) || 1;
+      dx /= len;
+      dy /= len;
+      const nx = -dy; // normal to the channel
+      const ny = dx;
+      const fac = facs.reduce((c, f) => c + (Math.hypot(f.x - net.x[n], f.y - net.y[n]) <= WALK_M ? 1 : 0), 0);
+      const H = 70 + Math.min(fac, 12) * 8;
+      for (const side of [1, -1]) {
+        const cx = net.x[n] + nx * TOWER_OFFSET * side;
+        const cy = net.y[n] + ny * TOWER_OFFSET * side;
+        const hh = side === 1 ? H : H * 0.78;
+        push(ngon(frame, cx, cy, 26), '#0e7490', 16, 0); // podium
+        push(ngon(frame, cx, cy, 15), '#22d3ee', hh, 16); // tower
+        push(ngon(frame, cx, cy, 9), '#e879f9', hh + 14, hh); // crown
+        push(ngon(frame, cx, cy, 2.5, 6), '#ffffff', hh + 48, hh + 14); // spire
+      }
+      push(bar(frame, net.x[n] - nx * (TOWER_OFFSET - 14), net.y[n] - ny * (TOWER_OFFSET - 14), net.x[n] + nx * (TOWER_OFFSET - 14), net.y[n] + ny * (TOWER_OFFSET - 14), 6), '#e0f2fe', 38, 34);
+    });
+    (map.getSource(S.towers) as maplibregl.GeoJSONSource | undefined)?.setData(fc(feats));
+  }, [ready, net, frame, landings, facs, map]);
+
+  // ---------- camera ----------
+  // downtown: the landing with the most facilities around it, where the skyline is densest
+  const downtown = useMemo(() => {
+    if (!net || !frame || !landings.length) return null;
+    let best = landings[0];
+    let bc = -1;
+    for (const n of landings) {
+      const c = facs.reduce((k, f) => k + (Math.hypot(f.x - net.x[n], f.y - net.y[n]) <= WALK_M ? 1 : 0), 0);
+      if (c > bc) {
+        bc = c;
+        best = n;
+      }
+    }
+    return unproject(frame, net.x[best], net.y[best]);
+  }, [net, frame, landings, facs]);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (cam === 'follow' || cam === 'free') {
+      appliedCam.current = cam;
+      return;
+    }
+    if (appliedCam.current === cam) return; // already there; do not yank the view when data changes
+    if (cam === 'overview' && boundsRef.current) {
+      appliedCam.current = cam;
+      map.fitBounds(boundsRef.current, { pitch: 55, bearing: -20, padding: 50, duration: 1600 });
+    } else if (cam === 'downtown' && downtown) {
+      appliedCam.current = cam;
+      map.easeTo({ center: downtown, zoom: 14.6, pitch: 62, bearing: -25, duration: 1800 });
+    }
+  }, [cam, ready, downtown, map]);
 
   // ---------- the fleet, and what the tracked boat is passing ----------
   useEffect(() => {
@@ -912,10 +1015,19 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
         </button>
       </div>
 
+      <p className="sub">Skyline: {future === 0 ? 'today' : `${future}% future`}</p>
+      <input className="range" type="range" min={0} max={100} step={5} value={future} onChange={(e) => setFuture(Number(e.target.value))} />
+      <p className="muted" style={{ margin: '2px 0 0' }}>
+        Zoom in to see it. Buildings only draw from about zoom 13.
+      </p>
+
       <p className="sub">Camera</p>
       <div className="seg">
         <button className={cam === 'overview' ? 'on' : ''} onClick={() => setCam('overview')}>
           Overview
+        </button>
+        <button className={cam === 'downtown' ? 'on' : ''} onClick={() => setCam('downtown')}>
+          Downtown
         </button>
         <button className={cam === 'follow' ? 'on' : ''} onClick={() => setCam('follow')}>
           Ride boat {tIdx + 1}
@@ -1033,7 +1145,7 @@ export default function Day08({ map }: { map: maplibregl.Map }) {
       )}
 
       <p className="muted" style={{ marginTop: 8 }}>
-        A scenario, not a plan. Channel widths and boat speeds are assumed. Many of these waterways are narrow, culverted or drains today, and bridge clearances are not in the data. Faint channels are not connected to the main network. Only places mapped in OpenStreetMap with a name can pop up.
+        A scenario, not a plan. The building footprints are real OpenStreetMap buildings, but the heights, the landing towers and the sky-bridges are invented. Channel widths and boat speeds are assumed. Many of these waterways are narrow, culverted or drains today, and bridge clearances are not in the data. Faint channels are not connected to the main network. Only places mapped in OpenStreetMap with a name can pop up.
       </p>
       {missing && (
         <p className="warn">
