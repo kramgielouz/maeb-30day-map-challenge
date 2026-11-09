@@ -10,16 +10,16 @@ export interface BoundaryHandle {
 }
 
 // Adds the city boundary (optional dimming mask, tint, glow, outline) under whatever the day adds next.
-// Returns null when public/data/butuan-boundary.geojson is missing.
+// Returns null when the boundary file is missing (public/data/butuan-boundary.geojson, or the `url` you pass).
 export async function addBoundary(
   map: maplibregl.Map,
   prefix: string,
-  opts: { mask?: boolean; fit?: boolean; signal?: AbortSignal } = {},
+  opts: { mask?: boolean; fit?: boolean; signal?: AbortSignal; url?: string } = {},
 ): Promise<BoundaryHandle | null> {
-  const { mask = true, fit = true, signal } = opts;
+  const { mask = true, fit = true, signal, url = BND_URL } = opts;
   let gj: any;
   try {
-    const r = await fetch(BND_URL);
+    const r = await fetch(url);
     if (!r.ok) return null;
     gj = await r.json();
   } catch {

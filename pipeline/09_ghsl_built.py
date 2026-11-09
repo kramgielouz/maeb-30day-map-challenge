@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Day 9 data: how built-up Butuan City was in each of 10 years (1975 to 2020), from the GHSL.
+"""Day 9 data: how built-up Butuan City, and the whole Caraga region, were in each of 10 years (1975 to 2020), from the GHSL.
 
     pip install rasterio numpy
-    python pipeline/09_ghsl_built.py      (run 01_osm_facilities.py first, for the city boundary)
+    python pipeline/09_ghsl_built.py                 both extents (Butuan needs 01_osm_facilities.py run first, for the city boundary)
+    python pipeline/09_ghsl_built.py --only caraga   just the region (no boundary file needed)
+    python pipeline/09_ghsl_built.py --only butuan   just the city
 
 Source: GHS-BUILT-S R2023A, built-up surface per ~100 m (3 arc-second) cell, in 5-year steps.
 It downloads the one 10 x 10 degree tile that covers the city for each year (a few MB to a few tens of MB each,
 cached in pipeline/_cache) and crops it to the city.
-Output: public/data/day09-built.png   8-bit greyscale. The 10 years are stacked top to bottom, each w x h pixels.
-                                      Pixel value = built-up share of the cell (0 to 255 = 0 to 100%).
-        public/data/day09-built.json  bbox, grid size, years and attribution
+Output, per extent (Butuan at ~100 m, Caraga averaged up to ~460 m so the browser stays fast):
+        public/data/day09-built.png / day09-built.json                  Butuan City
+        public/data/day09-caraga-built.png / day09-caraga-built.json    Caraga region and surroundings
+        The PNG is 8-bit greyscale with the 10 years stacked top to bottom, each w x h pixels.
+        Pixel value = built-up share of the cell (0 to 255 = 0 to 100%). The JSON holds bbox, grid size, years and attribution.
 Years before the satellite era of each region are interpolated or extrapolated by GHSL, so treat the early years as estimates.
 Licence: CC BY 4.0, European Commission, Joint Research Centre (JRC).
 """
@@ -35,6 +39,21 @@ URL = (
 )
 CACHE = Path(__file__).resolve().parent / "_cache"
 CELL_DEG = 1 / 1200  # 3 arc-seconds
+# A generous window around Caraga (south, west, north, east). It includes some neighbouring land; the app only names Caraga towns.
+CARAGA_BBOX = (7.4, 124.9, 10.8, 126.9)  # used when public/data/caraga-boundary.geojson (09_caraga_boundary.py) is missing
+
+
+def caraga_bbox() -> tuple[float, float, float, float]:
+    """The window around the Caraga outline (plus a little margin) if it exists, else the fixed one above."""
+    p = DATA / "caraga-boundary.geojson"
+    if not p.exists():
+        return CARAGA_BBOX
+    g = json.loads(p.read_text())["geometry"]
+    polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+    xs = [pt[0] for poly in polys for pt in poly[0]]
+    ys = [pt[1] for poly in polys for pt in poly[0]]
+    pad = 0.03
+    return (min(ys) - pad, min(xs) - pad, max(ys) + pad, max(xs) + pad)
 ATTRIBUTION = "GHS-BUILT-S R2023A, European Commission, Joint Research Centre (JRC), CC BY 4.0"
 
 
@@ -110,25 +129,30 @@ def read_year(tifs: list[Path], bounds) -> tuple[np.ndarray, float, float]:
     return arr[0], tf.c, tf.f, nodata
 
 
-def main() -> None:
-    s, w, n, e = butuan_bbox(0.01)
+def build_extent(name: str, bbox: tuple[float, float, float, float], block: int, png: str, meta_name: str) -> None:
+    s, w, n, e = bbox
     tiles = tiles_for(s, w, n, e)
-    print("Tiles:", ", ".join(tiles))
+    print(f"{name}: tiles {', '.join(tiles)}")
     layers, west, north = [], None, None
     for y in YEARS:
         tifs = [fetch_tif(y, t) for t in tiles]
         arr, west, north, nodata = read_year(tifs, (w, s, e, n))
-        layers.append(np.rint(built_share(arr, north, nodata) * 255).astype(np.uint8))
+        share = built_share(arr, north, nodata)
+        if block > 1:  # average the shares of block x block cells: still the built-up share of the bigger cell
+            h2, w2 = share.shape[0] // block * block, share.shape[1] // block * block
+            share = share[:h2, :w2].reshape(h2 // block, block, w2 // block, block).mean(axis=(1, 3))
+        layers.append(np.rint(share * 255).astype(np.uint8))
     h, wd = layers[0].shape
+    cell = CELL_DEG * block
     DATA.mkdir(parents=True, exist_ok=True)
-    write_png_gray(DATA / "day09-built.png", np.vstack(layers))
-    (DATA / "day09-built.json").write_text(
+    write_png_gray(DATA / png, np.vstack(layers))
+    (DATA / meta_name).write_text(
         json.dumps(
             {
-                "bbox": [west, north - h * CELL_DEG, west + wd * CELL_DEG, north],
+                "bbox": [west, north - h * cell, west + wd * cell, north],
                 "w": wd,
                 "h": h,
-                "cell_deg": CELL_DEG,
+                "cell_deg": cell,
                 "years": YEARS,
                 "layout": "stacked top to bottom, one h-row block per year",
                 "source": "GHS-BUILT-S R2023A (CC BY 4.0)",
@@ -138,7 +162,15 @@ def main() -> None:
         )
     )
     tot = [float(l.mean()) / 255 * 100 for l in layers]
-    print(f"Wrote {wd} x {h} cells x {len(YEARS)} years. Mean built-up share of the box: {tot[0]:.2f}% in {YEARS[0]} to {tot[-1]:.2f}% in {YEARS[-1]}.")
+    print(f"  wrote {wd} x {h} cells x {len(YEARS)} years. Mean built-up share of the box: {tot[0]:.2f}% in {YEARS[0]} to {tot[-1]:.2f}% in {YEARS[-1]}.")
+
+
+def main() -> None:
+    only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else "both"
+    if only in ("both", "butuan"):
+        build_extent("Butuan", butuan_bbox(0.01), 1, "day09-built.png", "day09-built.json")
+    if only in ("both", "caraga"):
+        build_extent("Caraga", caraga_bbox(), 5, "day09-caraga-built.png", "day09-caraga-built.json")
 
 
 if __name__ == "__main__":
