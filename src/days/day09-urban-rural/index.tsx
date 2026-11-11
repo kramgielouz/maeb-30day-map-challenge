@@ -8,6 +8,7 @@ import type { PolygonCoords } from '../../core/geo';
 // (the largest connected urban patch), so none of the numbers depend on where the city boundary is drawn.
 // Two extents: Butuan City (~100 m cells) and the whole Caraga region (~460 m cells), with the towns of Caraga ranked by urban area.
 // Data: pipeline/09_ghsl_built.py (both extents) and pipeline/09_osm_towns.py (town names).
+// The Record button plays the timeline and saves the map (with year, title and attribution burned in) as a video.
 type Extent = 'butuan' | 'caraga';
 const EXTENTS: Record<Extent, { label: string; meta: string; png: string; nbR: number; core: number; fringe: number; minKm2: number }> = {
   // nbR: neighbourhood radius in cells (butuan: 5 x 5 cells of ~100 m; caraga: 3 x 3 cells of ~460 m)
@@ -20,6 +21,7 @@ const IMG = 'd09-img';
 const IMG_LAYER = 'd09-img-layer';
 const CITY = 'd09-cities';
 const CITY_LAYER = 'd09-cities-layer';
+const MASK = 'd09-mask'; // opaque black over the basemap, with a hole where the boundary is
 const SETTLE = 0.01; // "rural settlement": at least 1% built-up around the cell
 const ERA_T = 0.15; // a cell counts as built-up once 15% of it is built over
 const STEP_MS = 900;
@@ -167,146 +169,146 @@ const loadImage = (src: string) =>
 // Classify every cell in every year and find the main urban area (the largest connected urban patch) in each.
 export function analyse(built: Built, coreT: number, fringeT: number, cityMinKm2: number | null = null) {
   const withCities = cityMinKm2 !== null;
-    const { w, h, nb, frac, years, cellKm2, west, north, cd } = built;
-    const T1 = coreT / 100;
-    const T2 = Math.min(fringeT, coreT) / 100;
-    const mLng = 111.32 * Math.cos(((north - (h / 2) * cd) * Math.PI) / 180); // km per degree
-    const mLat = 111.32;
-    const cls = years.map(() => new Uint8Array(w * h));
-    const counts = years.map(() => [0, 0, 0, 0]);
-    const builtKm2 = years.map(() => 0);
-    const main = years.map(() => null as null | { areaKm2: number; builtKm2: number; cx: number; cy: number; r80: number });
-    const seen = new Uint8Array(w * h);
-    const queue = new Int32Array(w * h);
-    const lab = withCities ? years.map(() => new Int32Array(w * h).fill(-1)) : [];
-    const compSize: number[][] = years.map(() => []);
-    const compRep: number[][] = years.map(() => []);
+  const { w, h, nb, frac, years, cellKm2, west, north, cd } = built;
+  const T1 = coreT / 100;
+  const T2 = Math.min(fringeT, coreT) / 100;
+  const mLng = 111.32 * Math.cos(((north - (h / 2) * cd) * Math.PI) / 180); // km per degree
+  const mLat = 111.32;
+  const cls = years.map(() => new Uint8Array(w * h));
+  const counts = years.map(() => [0, 0, 0, 0]);
+  const builtKm2 = years.map(() => 0);
+  const main = years.map(() => null as null | { areaKm2: number; builtKm2: number; cx: number; cy: number; r80: number });
+  const seen = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  const lab = withCities ? years.map(() => new Int32Array(w * h).fill(-1)) : [];
+  const compSize: number[][] = years.map(() => []);
+  const compRep: number[][] = years.map(() => []);
 
-    years.forEach((_, yi) => {
-      const a = nb[yi];
-      const mask = new Uint8Array(w * h);
-      let b = 0;
-      for (let i = 0; i < w * h; i++) {
-        const c = a[i] >= T1 ? 0 : a[i] >= T2 ? 1 : a[i] >= SETTLE ? 2 : 3;
-        cls[yi][i] = c;
-        counts[yi][c]++;
-        b += frac[yi][i] / 255;
-        if (c < 2) mask[i] = 1;
-      }
-      builtKm2[yi] = b * cellKm2;
-
-      // largest 8-connected patch of urban core and fringe
-      seen.fill(0);
-      let best: Int32Array | null = null;
-      for (let s0 = 0; s0 < w * h; s0++) {
-        if (!mask[s0] || seen[s0]) continue;
-        let qs = 0;
-        let qe = 0;
-        queue[qe++] = s0;
-        seen[s0] = 1;
-        const cid = compSize[yi].length;
-        while (qs < qe) {
-          const i = queue[qs++];
-          if (withCities) lab[yi][i] = cid;
-          const x = i % w;
-          const y = (i - x) / w;
-          for (let dy = -1; dy <= 1; dy++)
-            for (let dx = -1; dx <= 1; dx++) {
-              const xx = x + dx;
-              const yy = y + dy;
-              if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-              const j = yy * w + xx;
-              if (mask[j] && !seen[j]) {
-                seen[j] = 1;
-                queue[qe++] = j;
-              }
-            }
-        }
-        compSize[yi].push(qe);
-        compRep[yi].push(s0);
-        if (!best || qe > best.length) best = queue.slice(0, qe);
-      }
-      if (!best) return;
-
-      // its size, its centre of gravity (weighted by how built-up each cell is) and how far its built-up land reaches
-      let wsum = 0;
-      let sx = 0;
-      let sy = 0;
-      for (const i of best) {
-        const wt = frac[yi][i] / 255;
-        wsum += wt;
-        sx += (i % w) * wt;
-        sy += Math.floor(i / w) * wt;
-      }
-      if (wsum === 0) return;
-      const cxCell = sx / wsum;
-      const cyCell = sy / wsum;
-      const d = Array.from(best, (i) => ({ km: Math.hypot(((i % w) - cxCell) * cd * mLng, (Math.floor(i / w) - cyCell) * cd * mLat), wt: frac[yi][i] / 255 }));
-      d.sort((p, q) => p.km - q.km);
-      let acc = 0;
-      let r80 = 0;
-      for (const e of d) {
-        acc += e.wt;
-        r80 = e.km;
-        if (acc >= 0.8 * wsum) break;
-      }
-      main[yi] = { areaKm2: best.length * cellKm2, builtKm2: wsum * cellKm2, cx: west + (cxCell + 0.5) * cd, cy: north - (cyCell + 0.5) * cd, r80 };
-    });
-
-    // the first year each cell counts as built-up
-    const era = new Uint8Array(w * h).fill(255);
-    for (let i = 0; i < w * h; i++)
-      for (let yi = 0; yi < years.length; yi++)
-        if (frac[yi][i] / 255 >= ERA_T) {
-          era[i] = yi;
-          break;
-        }
-    // fastest five-year jump in built-up land
-    let fastest = 1;
-    for (let yi = 2; yi < years.length; yi++) if (builtKm2[yi] - builtKm2[yi - 1] > builtKm2[fastest] - builtKm2[fastest - 1]) fastest = yi;
-
-    // Urban areas of the final year, and how each one grew: its area in earlier years, and how many separate patches it was made of.
-    // Urban land only ever increases, so the patches of an earlier year sit inside the final-year areas.
-    let cities: City[] = [];
-    let labK: Int32Array | null = null;
-    if (withCities) {
-      const K = years.length - 1;
-      labK = lab[K];
-      const minCells = Math.max(2, Math.round((cityMinKm2 ?? 0) / cellKm2));
-      const ids = compSize[K].map((sz, id) => ({ sz, id })).filter((c) => c.sz >= minCells).sort((a, b) => b.sz - a.sz).slice(0, 60);
-      const idToJ = new Int32Array(compSize[K].length).fill(-1);
-      ids.forEach((c, j) => (idToJ[c.id] = j));
-      cities = ids.map((c) => ({ id: c.id, cx: 0, cy: 0, area: new Array(years.length).fill(0), patches: new Array(years.length).fill(0) }));
-      const sx = new Float64Array(ids.length);
-      const sy = new Float64Array(ids.length);
-      const sw = new Float64Array(ids.length);
-      for (let i = 0; i < w * h; i++) {
-        const j = labK[i] >= 0 ? idToJ[labK[i]] : -1;
-        if (j < 0) continue;
-        const wt = frac[K][i] / 255;
-        sx[j] += (i % w) * wt;
-        sy[j] += Math.floor(i / w) * wt;
-        sw[j] += wt;
-      }
-      cities.forEach((c, j) => {
-        c.cx = west + ((sw[j] ? sx[j] / sw[j] : 0) + 0.5) * cd;
-        c.cy = north - ((sw[j] ? sy[j] / sw[j] : 0) + 0.5) * cd;
-      });
-      years.forEach((_, yi) => {
-        for (let i = 0; i < w * h; i++) {
-          if (lab[yi][i] < 0 || labK![i] < 0) continue;
-          const j = idToJ[labK![i]];
-          if (j >= 0) cities[j].area[yi] += cellKm2;
-        }
-        compSize[yi].forEach((sz, c) => {
-          if (sz < 2) return;
-          const li = labK![compRep[yi][c]];
-          const j = li >= 0 ? idToJ[li] : -1;
-          if (j >= 0) cities[j].patches[yi]++;
-        });
-      });
+  years.forEach((_, yi) => {
+    const a = nb[yi];
+    const mask = new Uint8Array(w * h);
+    let b = 0;
+    for (let i = 0; i < w * h; i++) {
+      const c = a[i] >= T1 ? 0 : a[i] >= T2 ? 1 : a[i] >= SETTLE ? 2 : 3;
+      cls[yi][i] = c;
+      counts[yi][c]++;
+      b += frac[yi][i] / 255;
+      if (c < 2) mask[i] = 1;
     }
-    return { cls, counts, builtKm2, main, era, fastest, mLng, mLat, cities, labK };
+    builtKm2[yi] = b * cellKm2;
+
+    // largest 8-connected patch of urban core and fringe
+    seen.fill(0);
+    let best: Int32Array | null = null;
+    for (let s0 = 0; s0 < w * h; s0++) {
+      if (!mask[s0] || seen[s0]) continue;
+      let qs = 0;
+      let qe = 0;
+      queue[qe++] = s0;
+      seen[s0] = 1;
+      const cid = compSize[yi].length;
+      while (qs < qe) {
+        const i = queue[qs++];
+        if (withCities) lab[yi][i] = cid;
+        const x = i % w;
+        const y = (i - x) / w;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+            const j = yy * w + xx;
+            if (mask[j] && !seen[j]) {
+              seen[j] = 1;
+              queue[qe++] = j;
+            }
+          }
+      }
+      compSize[yi].push(qe);
+      compRep[yi].push(s0);
+      if (!best || qe > best.length) best = queue.slice(0, qe);
+    }
+    if (!best) return;
+
+    // its size, its centre of gravity (weighted by how built-up each cell is) and how far its built-up land reaches
+    let wsum = 0;
+    let sx = 0;
+    let sy = 0;
+    for (const i of best) {
+      const wt = frac[yi][i] / 255;
+      wsum += wt;
+      sx += (i % w) * wt;
+      sy += Math.floor(i / w) * wt;
+    }
+    if (wsum === 0) return;
+    const cxCell = sx / wsum;
+    const cyCell = sy / wsum;
+    const d = Array.from(best, (i) => ({ km: Math.hypot(((i % w) - cxCell) * cd * mLng, (Math.floor(i / w) - cyCell) * cd * mLat), wt: frac[yi][i] / 255 }));
+    d.sort((p, q) => p.km - q.km);
+    let acc = 0;
+    let r80 = 0;
+    for (const e of d) {
+      acc += e.wt;
+      r80 = e.km;
+      if (acc >= 0.8 * wsum) break;
+    }
+    main[yi] = { areaKm2: best.length * cellKm2, builtKm2: wsum * cellKm2, cx: west + (cxCell + 0.5) * cd, cy: north - (cyCell + 0.5) * cd, r80 };
+  });
+
+  // the first year each cell counts as built-up
+  const era = new Uint8Array(w * h).fill(255);
+  for (let i = 0; i < w * h; i++)
+    for (let yi = 0; yi < years.length; yi++)
+      if (frac[yi][i] / 255 >= ERA_T) {
+        era[i] = yi;
+        break;
+      }
+  // fastest five-year jump in built-up land
+  let fastest = 1;
+  for (let yi = 2; yi < years.length; yi++) if (builtKm2[yi] - builtKm2[yi - 1] > builtKm2[fastest] - builtKm2[fastest - 1]) fastest = yi;
+
+  // Urban areas of the final year, and how each one grew: its area in earlier years, and how many separate patches it was made of.
+  // Urban land only ever increases, so the patches of an earlier year sit inside the final-year areas.
+  let cities: City[] = [];
+  let labK: Int32Array | null = null;
+  if (withCities) {
+    const K = years.length - 1;
+    labK = lab[K];
+    const minCells = Math.max(2, Math.round((cityMinKm2 ?? 0) / cellKm2));
+    const ids = compSize[K].map((sz, id) => ({ sz, id })).filter((c) => c.sz >= minCells).sort((a, b) => b.sz - a.sz).slice(0, 60);
+    const idToJ = new Int32Array(compSize[K].length).fill(-1);
+    ids.forEach((c, j) => (idToJ[c.id] = j));
+    cities = ids.map((c) => ({ id: c.id, cx: 0, cy: 0, area: new Array(years.length).fill(0), patches: new Array(years.length).fill(0) }));
+    const sx = new Float64Array(ids.length);
+    const sy = new Float64Array(ids.length);
+    const sw = new Float64Array(ids.length);
+    for (let i = 0; i < w * h; i++) {
+      const j = labK[i] >= 0 ? idToJ[labK[i]] : -1;
+      if (j < 0) continue;
+      const wt = frac[K][i] / 255;
+      sx[j] += (i % w) * wt;
+      sy[j] += Math.floor(i / w) * wt;
+      sw[j] += wt;
+    }
+    cities.forEach((c, j) => {
+      c.cx = west + ((sw[j] ? sx[j] / sw[j] : 0) + 0.5) * cd;
+      c.cy = north - ((sw[j] ? sy[j] / sw[j] : 0) + 0.5) * cd;
+    });
+    years.forEach((_, yi) => {
+      for (let i = 0; i < w * h; i++) {
+        if (lab[yi][i] < 0 || labK![i] < 0) continue;
+        const j = idToJ[labK![i]];
+        if (j >= 0) cities[j].area[yi] += cellKm2;
+      }
+      compSize[yi].forEach((sz, c) => {
+        if (sz < 2) return;
+        const li = labK![compRep[yi][c]];
+        const j = li >= 0 ? idToJ[li] : -1;
+        if (j >= 0) cities[j].patches[yi]++;
+      });
+    });
+  }
+  return { cls, counts, builtKm2, main, era, fastest, mLng, mLat, cities, labK };
 }
 
 export default function Day09({ map }: { map: maplibregl.Map }) {
@@ -319,8 +321,20 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   const [mode, setMode] = useState<'classes' | 'era'>('classes');
   const [thr, setThr] = useState({ butuan: { core: EXTENTS.butuan.core, fringe: EXTENTS.butuan.fringe }, caraga: { core: EXTENTS.caraga.core, fringe: EXTENTS.caraga.fringe } });
   const [playing, setPlaying] = useState(false);
+  const [recording, setRecording] = useState(false);
   const cache = useRef<Partial<Record<Extent, Built & { extent: Extent }>>>({});
   const chart = useRef<HTMLCanvasElement>(null);
+  const rec = useRef<{
+    mr: MediaRecorder;
+    chunks: Blob[];
+    timer: number;
+    draw: () => void;
+    armed: boolean;
+    discard: boolean;
+    ext: string;
+  } | null>(null);
+  // latest values for the video overlay, read from inside the map's render handler
+  const live = useRef({ year: 0, title: '', attribution: '' });
 
   const coreT = thr[extent].core;
   const fringeT = thr[extent].fringe;
@@ -353,6 +367,15 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
       bh = await addBoundary(map, 'd09', extent === 'caraga' ? { url: CARAGA_OUTLINE_URL, fit: false, signal: ac.signal } : { signal: ac.signal });
       if (cancelled) return void bh?.remove();
       setNoOutline(extent === 'caraga' && !bh);
+      if (bh) {
+        // the outline itself is not drawn: hide its layers, and black out the basemap everywhere outside it instead
+        (map.getStyle().layers ?? []).forEach((l) => l.id.startsWith('d09-bnd') && map.setLayoutProperty(l.id, 'visibility', 'none'));
+        const world = [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]];
+        const data = { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [world, ...bh.polys.flatMap((poly) => poly)] } } as any;
+        const first = (map.getStyle().layers ?? []).find((l) => l.id.startsWith('d09') && l.id !== MASK)?.id;
+        map.addSource(MASK, { type: 'geojson', data });
+        map.addLayer({ id: MASK, type: 'fill', source: MASK, paint: { 'fill-color': '#000000', 'fill-opacity': 1, 'fill-antialias': false } }, first);
+      }
       let data = cache.current[extent];
       if (!data) {
         const meta = await fetch(cfg.meta).then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -404,14 +427,16 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
       cancelled = true;
       ac.abort();
       bh?.remove();
+      if (map.getLayer(MASK)) map.removeLayer(MASK);
+      if (map.getSource(MASK)) map.removeSource(MASK);
     };
   }, [extent, map]);
 
   // remove our layers when leaving the day
   useEffect(
     () => () => {
-      [CITY_LAYER, IMG_LAYER].forEach((l) => map.getLayer(l) && map.removeLayer(l));
-      [CITY, IMG].forEach((s) => map.getSource(s) && map.removeSource(s));
+      [CITY_LAYER, IMG_LAYER, MASK].forEach((l) => map.getLayer(l) && map.removeLayer(l));
+      [CITY, IMG, MASK].forEach((s) => map.getSource(s) && map.removeSource(s));
     },
     [map],
   );
@@ -488,6 +513,26 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
     return () => clearInterval(t);
   }, [playing, built]);
 
+  // recording: finish automatically once playback reaches the last year, hold it for 1.5 s, then stop and save
+  useEffect(() => {
+    const r = rec.current;
+    if (!recording || !r || !r.armed || playing || !built) return;
+    if (k < built.years.length - 1) return; // paused part-way: use the Stop button
+    const t = setTimeout(stopRecording, 1500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, playing, k, built]);
+
+  // switching extent or leaving the day discards an unfinished recording
+  useEffect(() => {
+    return () => {
+      const r = rec.current;
+      if (!r) return;
+      r.discard = true;
+      if (r.mr.state !== 'inactive') r.mr.stop();
+    };
+  }, [extent]);
+
   // the growth chart
   const seriesA = useMemo(() => {
     if (!built || !stats) return [];
@@ -549,11 +594,101 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   }, [built, stats, seriesA, k]);
 
   const scrub = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!built || (e.type === 'pointermove' && e.buttons !== 1)) return;
+    if (!built || recording || (e.type === 'pointermove' && e.buttons !== 1)) return;
     const r = e.currentTarget.getBoundingClientRect();
     const f = (e.clientX - r.left - 4) / (r.width - 8);
     setPlaying(false);
     setK(Math.min(built.years.length - 1, Math.max(0, Math.round(f * (built.years.length - 1)))));
+  };
+
+  // ---- video recording ----
+  const cleanupRecording = () => {
+    const r = rec.current;
+    if (!r) return;
+    map.off('render', r.draw);
+    clearInterval(r.timer);
+  };
+
+  const stopRecording = () => {
+    const r = rec.current;
+    if (!r) return;
+    setPlaying(false);
+    if (r.mr.state !== 'inactive') r.mr.stop(); // onstop does the download and cleanup
+  };
+
+  const startRecording = () => {
+    if (!built || rec.current) return;
+    const src = map.getCanvas();
+    const off = document.createElement('canvas');
+    off.width = src.width & ~1; // even dimensions suit video encoders
+    off.height = src.height & ~1;
+    const g = off.getContext('2d')!;
+
+    const type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
+    if (!type || !('captureStream' in off)) {
+      alert('This browser cannot record video from a canvas.');
+      return;
+    }
+    const ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
+    const mr = new MediaRecorder((off as any).captureStream(30), { mimeType: type, videoBitsPerSecond: 8_000_000 });
+    const chunks: Blob[] = [];
+
+    // Runs right after the map renders, while its WebGL buffer is still readable.
+    const draw = () => {
+      const { year, title, attribution } = live.current;
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, off.width, off.height); // clean black background
+      g.drawImage(src, 0, 0, off.width, off.height);
+      const fs = Math.round(off.width / 16);
+      g.lineJoin = 'round';
+      g.fillStyle = '#fff';
+      g.strokeStyle = 'rgba(0,0,0,.95)';
+      g.textBaseline = 'alphabetic';
+      g.textAlign = 'left';
+      g.font = `700 ${fs}px system-ui, sans-serif`;
+      g.lineWidth = fs / 7;
+      g.strokeText(String(year), fs * 0.4, off.height - fs * 0.5);
+      g.fillText(String(year), fs * 0.4, off.height - fs * 0.5);
+      g.font = `600 ${Math.round(fs / 3)}px system-ui, sans-serif`;
+      g.lineWidth = fs / 20;
+      g.strokeText(title, fs * 0.4, fs * 0.6);
+      g.fillText(title, fs * 0.4, fs * 0.6);
+      g.font = `${Math.round(fs / 6)}px system-ui, sans-serif`;
+      g.textAlign = 'right';
+      g.lineWidth = 3;
+      g.strokeText(attribution, off.width - 10, off.height - 8);
+      g.fillText(attribution, off.width - 10, off.height - 8);
+    };
+    map.on('render', draw);
+    // keep the map rendering so frames keep flowing while the picture is static
+    const timer = window.setInterval(() => map.triggerRepaint(), 33);
+
+    mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    mr.onstop = () => {
+      const r = rec.current;
+      cleanupRecording();
+      rec.current = null;
+      setRecording(false);
+      if (!r || r.discard || !chunks.length) return;
+      const url = URL.createObjectURL(new Blob(chunks, { type }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${extent}-urban-growth-1975-2020.${ext}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    };
+
+    rec.current = { mr, chunks, timer, draw, armed: false, discard: false, ext };
+    mr.start();
+    setRecording(true);
+    setPlaying(false);
+    setK(0);
+    // let the first year sit for a moment, then play
+    setTimeout(() => {
+      if (!rec.current) return;
+      rec.current.armed = true;
+      setPlaying(true);
+    }, 800);
   };
 
   const year = built ? built.years[k] : 0;
@@ -561,6 +696,13 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   const counts = stats ? stats.counts[k] : [0, 0, 0, 0];
   const km2 = (c: number) => (built ? c * built.cellKm2 : 0);
   const isCaraga = built?.extent === 'caraga';
+
+  // values the video overlay reads on every map render
+  live.current = {
+    year,
+    title: `How ${extent === 'caraga' ? 'Caraga' : 'Butuan'} grew, 1975 to 2020`,
+    attribution: built?.attribution ?? '',
+  };
 
   // Butuan: the main urban area
   const m = stats ? stats.main[k] : null;
@@ -589,7 +731,7 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
       <h4>How {extent === 'caraga' ? 'Caraga' : 'Butuan'} grew, 1975 to 2020</h4>
       <div className="seg">
         {(Object.keys(EXTENTS) as Extent[]).map((e) => (
-          <button key={e} className={extent === e ? 'on' : ''} onClick={() => setExtent(e)}>
+          <button key={e} className={extent === e ? 'on' : ''} disabled={recording} onClick={() => setExtent(e)}>
             {EXTENTS[e].label}
           </button>
         ))}
@@ -611,16 +753,24 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
         <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button
+              disabled={recording}
               onClick={() => {
                 if (!playing && k >= built.years.length - 1) setK(0);
                 setPlaying((p) => !p);
               }}
               aria-label={playing ? 'Pause' : 'Play'}
-              style={{ width: 38, height: 38, borderRadius: '50%', border: 0, background: 'var(--accent)', color: 'var(--on-accent, #fff)', font: 'inherit', fontSize: 16, cursor: 'pointer' }}
+              style={{ width: 38, height: 38, borderRadius: '50%', border: 0, background: 'var(--accent)', color: 'var(--on-accent, #fff)', font: 'inherit', fontSize: 16, cursor: recording ? 'default' : 'pointer', opacity: recording ? 0.5 : 1 }}
             >
               {playing ? '❚❚' : '▶'}
             </button>
             <div style={{ fontSize: 36, fontWeight: 700, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{year}</div>
+            <button
+              onClick={recording ? stopRecording : startRecording}
+              aria-label={recording ? 'Stop recording and save the video' : 'Record the animation as a video'}
+              style={{ marginLeft: 'auto', padding: '6px 12px', borderRadius: 16, border: 0, background: recording ? '#9b2226' : '#e5e7eb', color: recording ? '#fff' : '#111827', font: 'inherit', fontSize: 13, cursor: 'pointer' }}
+            >
+              {recording ? '■ Stop & save' : '● Record'}
+            </button>
           </div>
           <input
             className="range"
@@ -629,6 +779,7 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
             max={built.years.length - 1}
             step={1}
             value={k}
+            disabled={recording}
             onChange={(e) => {
               setPlaying(false);
               setK(Number(e.target.value));
@@ -707,14 +858,14 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
                   <span>Urban core: over</span>
                   <strong>{coreT}% built-up nearby</strong>
                 </div>
-                <input className="range" type="range" min={10} max={60} step={5} value={coreT} onChange={(e) => setT('core', Number(e.target.value))} />
+                <input className="range" type="range" min={10} max={60} step={5} value={coreT} disabled={recording} onChange={(e) => setT('core', Number(e.target.value))} />
               </div>
               <div className="legend-row" style={{ display: 'block' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>Built-up fringe: over</span>
                   <strong>{Math.min(fringeT, coreT)}%</strong>
                 </div>
-                <input className="range" type="range" min={2} max={25} step={1} value={fringeT} onChange={(e) => setT('fringe', Number(e.target.value))} />
+                <input className="range" type="range" min={2} max={25} step={1} value={fringeT} disabled={recording} onChange={(e) => setT('fringe', Number(e.target.value))} />
               </div>
             </>
           ) : (
