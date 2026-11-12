@@ -2,13 +2,16 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import { addBoundary, type BoundaryHandle } from '../../core/boundary';
 import type { PolygonCoords } from '../../core/geo';
+import { downloadVideo, drawWrapped, RATIOS, startVideo, type Ratio, type VideoResult, type VideoSession } from '../../core/videoExport';
+import ShareBar from '../../core/ShareBar';
 
 // How did Butuan's urban area grow? Built-up surface from the GHSL (GHS-BUILT-S R2023A), 1975 to 2020.
 // Every ~100 m cell is classed by how built-up its neighbourhood is. The insights are about the main urban area
 // (the largest connected urban patch), so none of the numbers depend on where the city boundary is drawn.
 // Two extents: Butuan City (~100 m cells) and the whole Caraga region (~460 m cells), with the towns of Caraga ranked by urban area.
 // Data: pipeline/09_ghsl_built.py (both extents) and pipeline/09_osm_towns.py (town names).
-// The Record button plays the timeline and saves the map (with year, title and attribution burned in) as a video.
+// "Download video" plays the timeline once, 1975 to 2020, and saves it as a video (3:4 by default; MP4 where the browser can make it),
+// with the title, year, legend and attribution drawn on. A share bar then offers the video to the phone's share sheet, and the link to social sites.
 type Extent = 'butuan' | 'caraga';
 const EXTENTS: Record<Extent, { label: string; meta: string; png: string; nbR: number; core: number; fringe: number; minKm2: number }> = {
   // nbR: neighbourhood radius in cells (butuan: 5 x 5 cells of ~100 m; caraga: 3 x 3 cells of ~460 m)
@@ -322,19 +325,15 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   const [thr, setThr] = useState({ butuan: { core: EXTENTS.butuan.core, fringe: EXTENTS.butuan.fringe }, caraga: { core: EXTENTS.caraga.core, fringe: EXTENTS.caraga.fringe } });
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [ratio, setRatio] = useState<Ratio>('3:4');
+  const [video, setVideo] = useState<VideoResult | null>(null);
+  const [videoError, setVideoError] = useState('');
   const cache = useRef<Partial<Record<Extent, Built & { extent: Extent }>>>({});
   const chart = useRef<HTMLCanvasElement>(null);
-  const rec = useRef<{
-    mr: MediaRecorder;
-    chunks: Blob[];
-    timer: number;
-    draw: () => void;
-    armed: boolean;
-    discard: boolean;
-    ext: string;
-  } | null>(null);
-  // latest values for the video overlay, read from inside the map's render handler
-  const live = useRef({ year: 0, title: '', attribution: '' });
+  const session = useRef<VideoSession | null>(null); // the recording in progress, if any
+  const armed = useRef(false); // true once the timeline has started playing for the recording
+  // latest values for the video overlay, read on every frame
+  const live = useRef({ year: 0, title: '', attribution: '', line: '', mode: 'classes' as 'classes' | 'era', first: 0, last: 0 });
 
   const coreT = thr[extent].core;
   const fringeT = thr[extent].fringe;
@@ -515,23 +514,21 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
 
   // recording: finish automatically once playback reaches the last year, hold it for 1.5 s, then stop and save
   useEffect(() => {
-    const r = rec.current;
-    if (!recording || !r || !r.armed || playing || !built) return;
+    if (!recording || !armed.current || playing || !built) return;
     if (k < built.years.length - 1) return; // paused part-way: use the Stop button
-    const t = setTimeout(stopRecording, 1500);
+    const t = setTimeout(() => session.current?.stop(), 1500);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, playing, k, built]);
 
-  // switching extent or leaving the day discards an unfinished recording
-  useEffect(() => {
-    return () => {
-      const r = rec.current;
-      if (!r) return;
-      r.discard = true;
-      if (r.mr.state !== 'inactive') r.mr.stop();
-    };
-  }, [extent]);
+  // switching extent or leaving the day throws away an unfinished recording
+  useEffect(
+    () => () => {
+      session.current?.cancel();
+      session.current = null;
+      armed.current = false;
+    },
+    [extent],
+  );
 
   // the growth chart
   const seriesA = useMemo(() => {
@@ -601,92 +598,106 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
     setK(Math.min(built.years.length - 1, Math.max(0, Math.round(f * (built.years.length - 1)))));
   };
 
-  // ---- video recording ----
-  const cleanupRecording = () => {
-    const r = rec.current;
-    if (!r) return;
-    map.off('render', r.draw);
-    clearInterval(r.timer);
-  };
+  // ---- video recording (the engine is in core/videoExport.ts) ----
+  const fileName = `${extent}-urban-growth-1975-2020`;
+  const stopRecording = () => session.current?.stop();
 
-  const stopRecording = () => {
-    const r = rec.current;
-    if (!r) return;
-    setPlaying(false);
-    if (r.mr.state !== 'inactive') r.mr.stop(); // onstop does the download and cleanup
+  // what is drawn over the map in the video, in video pixels: title, year, legend, attribution
+  const drawVideoOverlay = (g: CanvasRenderingContext2D, w: number, h: number) => {
+    const { year: yr, title, attribution, line, mode: md, first, last: lastYr } = live.current;
+    const u = Math.min(w, h * 0.75) / 100; // 1% of the narrow side, so the layout scales with the video
+    g.lineJoin = 'round';
+    g.textBaseline = 'alphabetic';
+    g.textAlign = 'left';
+    g.fillStyle = '#fff';
+    g.strokeStyle = 'rgba(0,0,0,.92)';
+    g.font = `700 ${u * 5.4}px system-ui, sans-serif`;
+    g.lineWidth = u * 0.9;
+    const y1 = drawWrapped(g, title, u * 5, u * 10, w - u * 10, u * 6.4);
+    g.font = `${u * 2.8}px system-ui, sans-serif`;
+    g.lineWidth = u * 0.5;
+    drawWrapped(g, line, u * 5, y1 + u * 0.5, w - u * 10, u * 3.6);
+
+    // legend
+    const ly = h - u * 9;
+    g.font = `${u * 2.5}px system-ui, sans-serif`;
+    g.lineWidth = u * 0.45;
+    if (md === 'classes') {
+      let x = u * 5;
+      CLASSES.slice(0, 3).forEach((c) => {
+        g.fillStyle = c.color;
+        g.fillRect(x, ly - u * 2.2, u * 2.6, u * 2.6);
+        g.fillStyle = '#fff';
+        g.strokeText(c.name, x + u * 3.6, ly);
+        g.fillText(c.name, x + u * 3.6, ly);
+        x += u * 4.6 + g.measureText(c.name).width + u * 2;
+      });
+    } else {
+      const bw = w - u * 10;
+      const gr = g.createLinearGradient(u * 5, 0, u * 5 + bw, 0);
+      ERA_COLORS.forEach((c, i) => gr.addColorStop(i / (ERA_COLORS.length - 1), c));
+      g.fillStyle = gr;
+      g.fillRect(u * 5, ly - u * 2.6, bw, u * 1.8);
+      g.fillStyle = '#fff';
+      g.textAlign = 'left';
+      g.strokeText(`built by ${first}`, u * 5, ly + u * 1.2);
+      g.fillText(`built by ${first}`, u * 5, ly + u * 1.2);
+      g.textAlign = 'right';
+      g.strokeText(String(lastYr), u * 5 + bw, ly + u * 1.2);
+      g.fillText(String(lastYr), u * 5 + bw, ly + u * 1.2);
+      g.textAlign = 'left';
+    }
+
+    // the year
+    g.fillStyle = '#fff';
+    g.font = `800 ${u * 21}px system-ui, sans-serif`;
+    g.lineWidth = u * 1.6;
+    g.strokeText(String(yr), u * 4.5, h - u * 13);
+    g.fillText(String(yr), u * 4.5, h - u * 13);
+
+    // attribution, shrunk to fit one line
+    let fs = u * 1.9;
+    g.font = `${fs}px system-ui, sans-serif`;
+    while (g.measureText(attribution).width > w - u * 10 && fs > u * 1) {
+      fs -= u * 0.1;
+      g.font = `${fs}px system-ui, sans-serif`;
+    }
+    g.lineWidth = u * 0.4;
+    g.strokeText(attribution, u * 5, h - u * 3.5);
+    g.fillText(attribution, u * 5, h - u * 3.5);
   };
 
   const startRecording = () => {
-    if (!built || rec.current) return;
-    const src = map.getCanvas();
-    const off = document.createElement('canvas');
-    off.width = src.width & ~1; // even dimensions suit video encoders
-    off.height = src.height & ~1;
-    const g = off.getContext('2d')!;
-
-    const type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
-    if (!type || !('captureStream' in off)) {
-      alert('This browser cannot record video from a canvas.');
+    if (!built || session.current) return;
+    const W = map.getCanvas().clientWidth;
+    const panel = window.innerWidth > 900 ? 390 : 0; // the panel covers the left of the map, so centre the crop on what is left
+    const phone = window.matchMedia('(pointer: coarse)').matches; // phones: a smaller video, and no automatic download
+    const s = startVideo({ map, ratio, shortSide: phone ? 720 : 1080, focus: { x: (panel + (W - panel) / 2) / W, y: 0.5 }, drawOverlay: drawVideoOverlay });
+    if (!s) {
+      setVideoError('This browser cannot record video from the map. Try Chrome on Android or a desktop browser.');
       return;
     }
-    const ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
-    const mr = new MediaRecorder((off as any).captureStream(30), { mimeType: type, videoBitsPerSecond: 8_000_000 });
-    const chunks: Blob[] = [];
-
-    // Runs right after the map renders, while its WebGL buffer is still readable.
-    const draw = () => {
-      const { year, title, attribution } = live.current;
-      g.fillStyle = '#000';
-      g.fillRect(0, 0, off.width, off.height); // clean black background
-      g.drawImage(src, 0, 0, off.width, off.height);
-      const fs = Math.round(off.width / 16);
-      g.lineJoin = 'round';
-      g.fillStyle = '#fff';
-      g.strokeStyle = 'rgba(0,0,0,.95)';
-      g.textBaseline = 'alphabetic';
-      g.textAlign = 'left';
-      g.font = `700 ${fs}px system-ui, sans-serif`;
-      g.lineWidth = fs / 7;
-      g.strokeText(String(year), fs * 0.4, off.height - fs * 0.5);
-      g.fillText(String(year), fs * 0.4, off.height - fs * 0.5);
-      g.font = `600 ${Math.round(fs / 3)}px system-ui, sans-serif`;
-      g.lineWidth = fs / 20;
-      g.strokeText(title, fs * 0.4, fs * 0.6);
-      g.fillText(title, fs * 0.4, fs * 0.6);
-      g.font = `${Math.round(fs / 6)}px system-ui, sans-serif`;
-      g.textAlign = 'right';
-      g.lineWidth = 3;
-      g.strokeText(attribution, off.width - 10, off.height - 8);
-      g.fillText(attribution, off.width - 10, off.height - 8);
-    };
-    map.on('render', draw);
-    // keep the map rendering so frames keep flowing while the picture is static
-    const timer = window.setInterval(() => map.triggerRepaint(), 33);
-
-    mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    mr.onstop = () => {
-      const r = rec.current;
-      cleanupRecording();
-      rec.current = null;
-      setRecording(false);
-      if (!r || r.discard || !chunks.length) return;
-      const url = URL.createObjectURL(new Blob(chunks, { type: type.split(';')[0] }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${extent}-urban-growth-1975-2020.${ext}`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-    };
-
-    rec.current = { mr, chunks, timer, draw, armed: false, discard: false, ext };
-    mr.start();
+    setVideoError('');
+    session.current = s;
+    armed.current = false;
+    setVideo(null);
     setRecording(true);
     setPlaying(false);
     setK(0);
+    // when it ends: save the file straight away and keep it for the share bar
+    void s.done.then((res) => {
+      session.current = null;
+      armed.current = false;
+      setRecording(false);
+      if (!res) return;
+      setVideo(res);
+      // phones often block a download that does not come from a tap, so there the Save video button does it
+      if (!phone) downloadVideo(res, fileName);
+    });
     // let the first year sit for a moment, then play
     setTimeout(() => {
-      if (!rec.current) return;
-      rec.current.armed = true;
+      if (!session.current) return;
+      armed.current = true;
       setPlaying(true);
     }, 800);
   };
@@ -697,13 +708,6 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   const km2 = (c: number) => (built ? c * built.cellKm2 : 0);
   const isCaraga = built?.extent === 'caraga';
 
-  // values the video overlay reads on every map render
-  live.current = {
-    year,
-    title: `How ${extent === 'caraga' ? 'Caraga' : 'Butuan'} grew, 1975 to 2020`,
-    attribution: built?.attribution ?? '',
-  };
-
   // Butuan: the main urban area
   const m = stats ? stats.main[k] : null;
   const k0 = stats ? Math.max(0, stats.main.findIndex((q) => q && q.areaKm2 >= 0.5)) : 0;
@@ -713,6 +717,17 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
   const shiftDeg = shift ? (((Math.atan2(shift.dx, shift.dy) * 180) / Math.PI) % 360 + 360) % 360 : 0;
   const b0 = stats ? stats.builtKm2[0] : 0;
   const bk = stats ? stats.builtKm2[k] : 0;
+
+  // values the video overlay reads on every frame
+  live.current = {
+    year,
+    title: `How ${extent === 'caraga' ? 'Caraga' : 'Butuan'} grew, 1975 to 2020`,
+    attribution: built?.attribution ?? '',
+    line: `Built-up surface in the area: ${bk.toFixed(0)} km²${k > 0 && b0 > 0 ? ` (${(bk / b0).toFixed(1)}× its 1975 size)` : ''}`,
+    mode,
+    first: built?.years[0] ?? 1975,
+    last: built?.years[last] ?? 2020,
+  };
 
   // Caraga: the ranking of urban areas in the chosen year, and the stories in it
   const ranking = topCities
@@ -766,10 +781,10 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
             <div style={{ fontSize: 36, fontWeight: 700, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{year}</div>
             <button
               onClick={recording ? stopRecording : startRecording}
-              aria-label={recording ? 'Stop recording and save the video' : 'Record the animation as a video'}
+              aria-label={recording ? 'Stop recording and save the video' : 'Download the 1975 to 2020 run-through as a video'}
               style={{ marginLeft: 'auto', padding: '6px 12px', borderRadius: 16, border: 0, background: recording ? '#9b2226' : '#e5e7eb', color: recording ? '#fff' : '#111827', font: 'inherit', fontSize: 13, cursor: 'pointer' }}
             >
-              {recording ? '■ Stop & save' : '● Record'}
+              {recording ? '■ Stop & save' : '⬇ Download video'}
             </button>
           </div>
           <input
@@ -786,6 +801,19 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
             }}
             aria-label="Year"
           />
+          <p className="sub">Video shape</p>
+          <div className="seg">
+            {RATIOS.map((r) => (
+              <button key={r} className={ratio === r ? 'on' : ''} disabled={recording} onClick={() => setRatio(r)}>
+                {r === 'screen' ? 'As on screen' : r}
+              </button>
+            ))}
+          </div>
+          <p className="muted" style={{ margin: '4px 0 0' }}>
+            {recording ? `Recording… ${year}. It saves by itself at 2020.` : 'Press Download video: it plays 1975 to 2020 once and saves the file. 3:4 suits Facebook and Instagram posts; 9:16 suits stories and reels.'}
+          </p>
+          {videoError && <p className="warn">{videoError}</p>}
+          {video && <ShareBar title={`How ${extent === 'caraga' ? 'Caraga' : 'Butuan'} grew, 1975 to 2020`} text="Satellite built-up land, 1975 to 2020 (#30DayMapChallenge)" video={video} fileName={fileName} />}
 
           {isCaraga ? (
             <>
