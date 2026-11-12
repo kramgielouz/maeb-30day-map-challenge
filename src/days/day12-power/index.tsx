@@ -15,8 +15,8 @@ const GRID_URL = '/data/day12-grid.geojson';
 const BOUNDARY_URL = '/data/caraga-boundary.geojson';
 const BUTUAN: [number, number] = [125.54, 8.95];
 const L_REF = 25; // radiance (nW/cm2/sr) that gets the full height
-const HOLD_MS = 3500; // per year while recording
-const SPIN = 0.005; // degrees of camera turn per ms while recording
+const HOLD_MS = 4000; // per year while recording
+const SPIN = 0.003; // degrees of camera turn per ms while recording
 
 const GRID_STOPS: [number, string][] = [[0, '#ffcf5c'], [2, '#fff1c9'], [6, '#8fd0ff']];
 const DARK = '#3b4352';
@@ -287,7 +287,7 @@ export default function Day12({ map }: { map: maplibregl.Map }) {
     off.width = src.width & ~1;
     off.height = src.height & ~1;
     const g = off.getContext('2d')!;
-    const type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
+    const type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
     if (!type || !('captureStream' in off)) {
       alert('This browser cannot record video from a canvas.');
       return;
@@ -365,7 +365,7 @@ export default function Day12({ map }: { map: maplibregl.Map }) {
       setRecording(false);
       if (r) map.jumpTo({ bearing: r.bearing });
       if (!r || r.discard || !chunks.length) return;
-      const url = URL.createObjectURL(new Blob(chunks, { type }));
+      const url = URL.createObjectURL(new Blob(chunks, { type: type.split(';')[0] }));
       const a = document.createElement('a');
       a.href = url;
       a.download = `power-lit-and-dark.${ext}`;

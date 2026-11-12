@@ -624,7 +624,7 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
     off.height = src.height & ~1;
     const g = off.getContext('2d')!;
 
-    const type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
+    const type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
     if (!type || !('captureStream' in off)) {
       alert('This browser cannot record video from a canvas.');
       return;
@@ -670,7 +670,7 @@ export default function Day09({ map }: { map: maplibregl.Map }) {
       rec.current = null;
       setRecording(false);
       if (!r || r.discard || !chunks.length) return;
-      const url = URL.createObjectURL(new Blob(chunks, { type }));
+      const url = URL.createObjectURL(new Blob(chunks, { type: type.split(';')[0] }));
       const a = document.createElement('a');
       a.href = url;
       a.download = `${extent}-urban-growth-1975-2020.${ext}`;

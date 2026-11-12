@@ -8,6 +8,7 @@ import { boundsOf, inverseMask, polygonsOf } from '../../core/geo';
 // is the urban heat island. All sound is synthesized in the browser with the Web Audio API (no audio files).
 // Data: pipeline/11_heat.py (reads the export from gee/day11_lst_export.js). Without that export it writes a
 // clearly flagged synthetic demo, and this page shows a banner while the demo is loaded.
+// The Record button plays the line once and saves a video file (map, chart, title and the sound).
 const P = 'd11-';
 const HEAT_URL = '/data/day11-heat.json';
 const BOUNDARY_URL = '/data/butuan-boundary.geojson';
@@ -87,6 +88,7 @@ class Synth {
   ctx: AudioContext;
   master: GainNode;
   send: GainNode;
+  dest: MediaStreamAudioDestinationNode; // a copy of the output, for the video recorder
   voices: Voice[] = [];
   constructor(n: number) {
     const AC = window.AudioContext || (window as any).webkitAudioContext;
@@ -95,6 +97,8 @@ class Synth {
     const comp = this.ctx.createDynamicsCompressor();
     this.master.connect(comp);
     comp.connect(this.ctx.destination);
+    this.dest = this.ctx.createMediaStreamDestination();
+    comp.connect(this.dest);
     // a small room: generated noise that fades away over ~2.4 s
     const len = Math.floor(this.ctx.sampleRate * 2.4);
     const ir = this.ctx.createBuffer(2, len, this.ctx.sampleRate);
@@ -227,6 +231,7 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
   const [custom, setCustom] = useState<Pt[] | null>(null);
   const [drawing, setDrawing] = useState<Pt[] | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [scale, setScale] = useState<Scale>('pmaj');
   const [drone, setDrone] = useState(true);
   const [loop, setLoop] = useState(false);
@@ -240,6 +245,14 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const drag = useRef(false);
   const probeTimer = useRef(0);
+  const rec = useRef<{
+    mr: MediaRecorder;
+    chunks: Blob[];
+    timer: number;
+    draw: () => void;
+    armed: boolean;
+    discard: boolean;
+  } | null>(null);
 
   useEffect(() => {
     let off = false;
@@ -514,7 +527,7 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
       last = now;
       let t = tRef.current + dt / cfg.current.seconds;
       if (t >= 1) {
-        if (cfg.current.loop) t = 0;
+        if (cfg.current.loop && !rec.current) t = 0; // a recording always ends at the end of the line
         else {
           move(1, true);
           pulse(1, true);
@@ -545,6 +558,142 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
       pulse(t, true);
     }
   };
+
+  // ---- video recording: map + chart + title + the sound, one pass along the line ----
+  const cleanupRecording = () => {
+    const r = rec.current;
+    if (!r) return;
+    map.off('render', r.draw);
+    clearInterval(r.timer);
+  };
+  const stopRecording = () => {
+    const r = rec.current;
+    if (!r) return;
+    stop();
+    if (r.mr.state !== 'inactive') r.mr.stop(); // onstop saves the file
+  };
+  const startRecording = () => {
+    if (rec.current || !cfg.current.samples || !cfg.current.heat) return;
+    const sy = ensureSynth(); // started from a click, so the browser allows audio
+    stop();
+    const src = map.getCanvas();
+    const off = document.createElement('canvas');
+    off.width = src.width & ~1; // even dimensions suit video encoders
+    off.height = src.height & ~1;
+    const g = off.getContext('2d')!;
+
+    const type = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1,opus', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t));
+    if (!type || !('captureStream' in off)) {
+      alert('This browser cannot record video from a canvas.');
+      return;
+    }
+    const ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
+    const stream: MediaStream = (off as any).captureStream(30);
+    sy.dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
+    const mr = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 160_000 });
+    const chunks: Blob[] = [];
+
+    // Runs right after the map renders, while its WebGL buffer is still readable.
+    const frame = () => {
+      const { yearA: a, yearB: b, heat: h, metric: me } = cfg.current;
+      if (!h) return;
+      const k = off.width / src.clientWidth; // CSS pixels to video pixels
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, off.width, off.height);
+      g.drawImage(src, 0, 0, off.width, off.height);
+
+      // the chart panel, in the place it has on screen
+      const cv = canvas.current;
+      if (cv) {
+        const m = src.getBoundingClientRect();
+        const r = cv.getBoundingClientRect();
+        const x = (r.left - m.left) * k;
+        const y = (r.top - m.top) * k;
+        const w = r.width * k;
+        const hh = r.height * k;
+        g.fillStyle = 'rgba(255,255,255,.95)';
+        g.fillRect(x - 4 * k, y - 4 * k, w + 8 * k, hh + 8 * k);
+        g.drawImage(cv, x, y, w, hh);
+        g.font = `700 ${Math.round(11.5 * k)}px system-ui, sans-serif`;
+        g.textAlign = 'right';
+        g.textBaseline = 'alphabetic';
+        let tx = x + w - 8 * k;
+        if (b !== null) {
+          g.fillStyle = COL_B;
+          g.fillText(`● ${h.meta.years[b]}`, tx, y + 10 * k);
+          tx -= 56 * k;
+        }
+        g.fillStyle = COL_A;
+        g.fillText(`● ${h.meta.years[a]}`, tx, y + 10 * k);
+      }
+
+      // title, years, and the colour key
+      const fs = Math.round(off.width / 34);
+      g.lineJoin = 'round';
+      g.textAlign = 'left';
+      g.textBaseline = 'alphabetic';
+      g.fillStyle = '#fff';
+      g.strokeStyle = 'rgba(0,0,0,.95)';
+      g.font = `700 ${fs}px system-ui, sans-serif`;
+      g.lineWidth = fs / 6;
+      const title = `Hear the heat · ${h.meta.years[a]}${b !== null ? ` vs ${h.meta.years[b]}` : ''}`;
+      g.strokeText(title, fs * 0.7, fs * 1.4);
+      g.fillText(title, fs * 0.7, fs * 1.4);
+      g.font = `${Math.round(fs * 0.55)}px system-ui, sans-serif`;
+      g.lineWidth = fs / 10;
+      const sub = me === 'lst' ? 'Land surface temperature (Landsat)' : 'Degrees above the rural reference';
+      g.strokeText(sub, fs * 0.7, fs * 2.2);
+      g.fillText(sub, fs * 0.7, fs * 2.2);
+      const stops = me === 'lst' ? LST_STOPS : UHI_STOPS;
+      const bw = off.width * 0.18;
+      const bx = off.width - bw - fs * 0.7;
+      const by = fs * 0.9;
+      const gr = g.createLinearGradient(bx, 0, bx + bw, 0);
+      stops.forEach(([v, c]) => gr.addColorStop((v - stops[0][0]) / (stops[stops.length - 1][0] - stops[0][0]), c));
+      g.fillStyle = gr;
+      g.fillRect(bx, by, bw, fs * 0.45);
+      g.strokeStyle = 'rgba(255,255,255,.7)';
+      g.lineWidth = 1;
+      g.strokeRect(bx, by, bw, fs * 0.45);
+      g.font = `${Math.round(fs * 0.5)}px system-ui, sans-serif`;
+      g.fillStyle = '#fff';
+      g.textAlign = 'left';
+      g.fillText(`${stops[0][0]} °C`, bx, by + fs * 1.1);
+      g.textAlign = 'right';
+      g.fillText(`${stops[stops.length - 1][0]} °C`, bx + bw, by + fs * 1.1);
+    };
+    map.on('render', frame);
+    // keep the map rendering so frames keep flowing while the picture is static
+    const timer = window.setInterval(() => map.triggerRepaint(), 33);
+
+    mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    mr.onstop = () => {
+      const r = rec.current;
+      cleanupRecording();
+      rec.current = null;
+      setRecording(false);
+      if (!r || r.discard || !chunks.length) return;
+      const url = URL.createObjectURL(new Blob(chunks, { type: type.split(';')[0] }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hear-the-heat-${cfg.current.heat?.meta.years[cfg.current.yearA] ?? ''}.${ext}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    };
+
+    rec.current = { mr, chunks, timer, draw: frame, armed: false, discard: false };
+    tRef.current = 0;
+    move(0, false);
+    mr.start();
+    setRecording(true);
+    // let the first frame sit for a moment, then play the line once
+    setTimeout(() => {
+      if (!rec.current) return;
+      rec.current.armed = true;
+      play();
+    }, 700);
+  };
+
   const latest = useRef({ play, stop, move, ensureSynth, voiceAt, draw, scrubNote, chord, pulse });
   latest.current = { play, stop, move, ensureSynth, voiceAt, draw, scrubNote, chord, pulse };
 
@@ -570,13 +719,12 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
         const polys = polygonsOf(gj);
         addSrc('tiles', empty);
         addSrc('mask', inverseMask(polys));
-        addSrc('boundary', gj);
         addSrc('line', empty);
         addSrc('draw', empty);
         addSrc('play', empty);
         addLayer({ id: 'tiles', type: 'fill', source: `${P}tiles`, paint: { 'fill-color': ['interpolate', ['linear'], ['get', 'v'], ...LST_STOPS.flat()] as any, 'fill-opacity': 0.88, 'fill-antialias': false } });
-        addLayer({ id: 'mask', type: 'fill', source: `${P}mask`, paint: { 'fill-color': '#10181c', 'fill-opacity': 0.55 } });
-        addLayer({ id: 'boundary', type: 'line', source: `${P}boundary`, paint: { 'line-color': '#ffffff', 'line-width': 1.4, 'line-opacity': 0.9 } });
+        // clean black basemap outside the city: opaque black everywhere except the boundary shape (the outline itself is not drawn)
+        addLayer({ id: 'mask', type: 'fill', source: `${P}mask`, paint: { 'fill-color': '#000000', 'fill-opacity': 1, 'fill-antialias': false } });
         addLayer({ id: 'line-casing', type: 'line', source: `${P}line`, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#000000', 'line-width': 6, 'line-opacity': 0.7 } });
         addLayer({ id: 'line', type: 'line', source: `${P}line`, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 2.5, 'line-dasharray': [1.5, 1.5] } });
         addLayer({ id: 'draw', type: 'circle', source: `${P}draw`, paint: { 'circle-radius': 6, 'circle-color': '#ffd60a', 'circle-stroke-color': '#000', 'circle-stroke-width': 2 } });
@@ -639,10 +787,20 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [heat]);
 
+  // recording ends by itself: once the line has played, wait for the last notes to die away, then save
+  useEffect(() => {
+    const r = rec.current;
+    if (!recording || !r || !r.armed || playing) return;
+    const t = setTimeout(stopRecording, 1800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, playing]);
+
   // clicks on the map: draw a line, or listen to one spot
   useEffect(() => {
     if (!ready) return;
     const onClick = (e: maplibregl.MapMouseEvent) => {
+      if (rec.current) return; // no interruptions while recording
       const here: Pt = [e.lngLat.lng, e.lngLat.lat];
       if (drawing) {
         const next = [...drawing, here];
@@ -696,6 +854,7 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
       const tag = (e.target as HTMLElement)?.tagName;
       if (e.code !== 'Space' || tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       e.preventDefault();
+      if (rec.current) return; // the recording runs by itself
       if (raf.current && cfgPlaying.current) latest.current.stop();
       else latest.current.play();
     };
@@ -705,21 +864,29 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
   const cfgPlaying = useRef(false);
   cfgPlaying.current = playing;
 
-  // tidy up when leaving the day
+  // tidy up when leaving the day (an unfinished recording is discarded)
   useEffect(
     () => () => {
+      const r = rec.current;
+      if (r) {
+        r.discard = true;
+        if (r.mr.state !== 'inactive') r.mr.stop();
+        cleanupRecording();
+        rec.current = null;
+      }
       cancelAnimationFrame(raf.current);
       window.clearTimeout(probeTimer.current);
       synth.current?.dispose();
       synth.current = null;
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
   // scrub the chart like a theremin
   const scrub = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = canvas.current;
-    if (!c) return;
+    if (!c || rec.current) return;
     const r = c.getBoundingClientRect();
     const t = clamp((e.clientX - r.left - 40) / (r.width - 50), 0, 1);
     latest.current.ensureSynth();
@@ -771,35 +938,44 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
           <>
             <div style={{ display: 'flex', gap: 8, margin: '8px 0 4px' }}>
               <button
+                disabled={recording}
                 onClick={() => (playing ? stop() : play())}
-                style={{ flex: 1, padding: '10px 12px', fontSize: 15, fontWeight: 700, borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer' }}
+                style={{ flex: 1, padding: '10px 12px', fontSize: 15, fontWeight: 700, borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', cursor: recording ? 'default' : 'pointer', opacity: recording ? 0.5 : 1 }}
                 aria-label={playing ? 'Pause the sound' : 'Play the sound'}
               >
                 {playing ? '❚❚  Pause' : '▶  Play the line'}
               </button>
               <button
+                disabled={recording}
                 onClick={() => {
                   stop();
                   latest.current.move(0, false);
                 }}
-                style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'transparent', color: 'inherit', cursor: 'pointer' }}
+                style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'transparent', color: 'inherit', cursor: recording ? 'default' : 'pointer', opacity: recording ? 0.5 : 1 }}
                 aria-label="Back to the start"
               >
                 ⏮
               </button>
+              <button
+                onClick={recording ? stopRecording : startRecording}
+                style={{ padding: '10px 12px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: 'none', background: recording ? '#9b2226' : '#e5e7eb', color: recording ? '#fff' : '#111827', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                aria-label={recording ? 'Stop recording and save the video' : 'Record the line as a video with sound'}
+              >
+                {recording ? '■ Stop & save' : '● Record'}
+              </button>
             </div>
             <p className="muted" style={{ margin: '0 0 6px', fontSize: 11.5 }}>
-              Space plays and pauses. Click the map to hear one spot. Drag across the chart below to scrub by hand. Use headphones for the two-year comparison.
+              Space plays and pauses. Click the map to hear one spot. Drag across the chart below to scrub by hand. Use headphones for the two-year comparison. Record plays the line once and saves a video with the sound.
             </p>
 
             <p className="sub">Line across the city</p>
             <div className="seg">
               {PRESETS.map((p) => (
-                <button key={p.id} className={seg(preset === p.id)} onClick={() => setPreset(p.id)} title={p.desc}>
+                <button key={p.id} className={seg(preset === p.id)} disabled={recording} onClick={() => setPreset(p.id)} title={p.desc}>
                   {p.label}
                 </button>
               ))}
-              <button className={seg(preset === 'custom' || !!drawing)} onClick={() => (drawing ? setDrawing(null) : (stop(), setDrawing([])))}>
+              <button className={seg(preset === 'custom' || !!drawing)} disabled={recording} onClick={() => (drawing ? setDrawing(null) : (stop(), setDrawing([])))}>
                 {drawing ? (drawing.length === 0 ? 'Click start…' : 'Click end…') : custom ? 'Redraw mine' : 'Draw mine'}
               </button>
             </div>
@@ -807,18 +983,18 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
             <p className="sub">Year you hear (left ear in a comparison)</p>
             <div className="seg">
               {years.map((y, i) => (
-                <button key={y} className={seg(yearA === i)} onClick={() => setYearA(i)}>
+                <button key={y} className={seg(yearA === i)} disabled={recording} onClick={() => setYearA(i)}>
                   {y}
                 </button>
               ))}
             </div>
             <p className="sub">Compare with (right ear)</p>
             <div className="seg">
-              <button className={seg(yearB === null)} onClick={() => setYearB(null)}>
+              <button className={seg(yearB === null)} disabled={recording} onClick={() => setYearB(null)}>
                 None
               </button>
               {years.map((y, i) => (
-                <button key={y} className={seg(yearB === i)} disabled={i === yearA} onClick={() => setYearB(i)} style={i === yearA ? { opacity: 0.35 } : undefined}>
+                <button key={y} className={seg(yearB === i)} disabled={i === yearA || recording} onClick={() => setYearB(i)} style={i === yearA ? { opacity: 0.35 } : undefined}>
                   {y}
                 </button>
               ))}
@@ -826,10 +1002,10 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
 
             <p className="sub">Map shows</p>
             <div className="seg">
-              <button className={seg(metric === 'lst')} onClick={() => setMetric('lst')}>
+              <button className={seg(metric === 'lst')} disabled={recording} onClick={() => setMetric('lst')}>
                 Surface temperature
               </button>
-              <button className={seg(metric === 'uhi')} onClick={() => setMetric('uhi')}>
+              <button className={seg(metric === 'uhi')} disabled={recording} onClick={() => setMetric('uhi')}>
                 Degrees above rural
               </button>
             </div>
@@ -853,7 +1029,7 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
                 <span>Time to cross the line</span>
                 <strong>{seconds} s</strong>
               </div>
-              <input className="range" type="range" min={8} max={40} step={2} value={seconds} onChange={(e) => setSeconds(Number(e.target.value))} aria-label="Seconds to cross the line" />
+              <input className="range" type="range" min={8} max={40} step={2} value={seconds} disabled={recording} onChange={(e) => setSeconds(Number(e.target.value))} aria-label="Seconds to cross the line" />
             </label>
             <p className="muted" style={{ margin: '8px 0 3px' }}>
               Musical scale
@@ -973,6 +1149,7 @@ export default function Day11({ map }: { map: maplibregl.Map }) {
             role="img"
             aria-label="Temperature along the line. Drag to scrub and hear it."
             onPointerDown={(e) => {
+              if (rec.current) return;
               drag.current = true;
               (e.target as HTMLElement).setPointerCapture(e.pointerId);
               stop();
