@@ -415,7 +415,7 @@ export default function Day13({ map }: { map: maplibregl.Map }) {
     );
   }, [ready, attractor, map]);
 
-  // 60fps Particle Simulation Loop
+  // 60fps Particle Simulation Loop with Realistic Local Density Slowdowns
   useEffect(() => {
     if (!ready || !segments.length) return;
     let lastTime = performance.now();
@@ -439,7 +439,6 @@ export default function Day13({ map }: { map: maplibregl.Map }) {
       lastTime = now;
 
       if (playingRef.current || recordingRef.current) {
-        // When recording, hourStep is calibrated so 24 hours pass precisely in 15 seconds
         const hourStep = recordingRef.current ? dt * (24 / 15) : dt * 0.4;
         setHour((prev) => (prev + hourStep) % 24);
       }
@@ -455,16 +454,23 @@ export default function Day13({ map }: { map: maplibregl.Map }) {
         const seg = segments[v.segIdx];
         if (!seg) continue;
 
-        let localCongestion = congestion * (v.isMain ? 1.1 : 0.35);
+        // Realistic Local Density Slowdown: 
+        // Vehicles only slow down if close to a clicked attractor hub or if main highways experience peak friction.
+        // Empty roads maintain free-flow speed (localCongestion stays near 0).
+        let localCongestion = 0;
         if (att) {
           const distToHub = Math.hypot(seg.mid[0] - att[0], seg.mid[1] - att[1]);
           if (distToHub < 0.025) {
             const pull = 1 - distToHub / 0.025;
-            localCongestion = Math.min(1, localCongestion + pull * 0.7);
+            localCongestion = pull * 0.8;
           }
         }
 
-        const speedFactor = 1 - localCongestion * 0.6;
+        if (v.isMain) {
+          localCongestion = Math.min(1, localCongestion + congestion * 0.35);
+        }
+
+        const speedFactor = 1 - localCongestion * 0.55;
         v.t += v.dir * v.baseSpeed * speedFactor * (dt * 220);
 
         if (v.t >= 1 || v.t <= 0) {
@@ -566,7 +572,7 @@ export default function Day13({ map }: { map: maplibregl.Map }) {
     session.current = s;
     setVideo(null);
     setRecording(true);
-    setHour(0.0); // Automatically starts at 00:00 midnight
+    setHour(0.0);
     setPlaying(true);
     void s.done.then((res) => {
       session.current = null;
@@ -575,7 +581,6 @@ export default function Day13({ map }: { map: maplibregl.Map }) {
       setVideo(res);
       if (!phone) downloadVideo(res, fileName);
     });
-    // Exactly 15 seconds recording duration (15000ms) covering 00:00 to 24:00
     setTimeout(() => session.current?.stop(), 15000);
   };
 
